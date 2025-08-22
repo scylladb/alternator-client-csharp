@@ -4,15 +4,35 @@
 
 namespace ScyllaDB.Alternator
 {
+    using System;
+    using System.Collections.Generic;
+    using System.Threading;
+
     /// <summary>
     /// Configuration options for the Helper class.
     /// </summary>
     public class HelperOptions
     {
         /// <summary>
-        /// Gets or sets the seed URI for connecting to ScyllaDB Alternator.
+        /// Gets or sets the schema (protocol) for connecting to ScyllaDB Alternator.
         /// </summary>
-        public Uri SeedUri { get; set; } = null!;
+        public string Schema { get; set; } = "http";
+
+        /// <summary>
+        /// Gets or sets the seed URI for connecting to ScyllaDB Alternator.
+        /// This property is used for backward compatibility. When set, it takes precedence over InitialNodes.
+        /// </summary>
+        public Uri SeedUri { get; set; }
+
+        /// <summary>
+        /// Gets or sets the initial nodes for connecting to ScyllaDB Alternator.
+        /// </summary>
+        public List<string> InitialNodes { get; set; } = new List<string>();
+
+        /// <summary>
+        /// Gets or sets the port for connecting to ScyllaDB Alternator.
+        /// </summary>
+        public int Port { get; set; } = 8000;
 
         /// <summary>
         /// Gets or sets the datacenter name for rack and datacenter filtering.

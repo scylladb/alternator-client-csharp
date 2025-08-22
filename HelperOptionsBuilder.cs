@@ -29,33 +29,6 @@ namespace ScyllaDB.Alternator
         }
 
         /// <summary>
-        /// Sets the seed URI for connecting to ScyllaDB Alternator.
-        /// </summary>
-        /// <param name="seedUri">The seed URI.</param>
-        /// <returns>The builder instance for method chaining.</returns>
-        public HelperOptionsBuilder WithSeedUri(Uri seedUri)
-        {
-            this.options.SeedUri = seedUri ?? throw new ArgumentNullException(nameof(seedUri));
-            return this;
-        }
-
-        /// <summary>
-        /// Sets the seed URI for connecting to ScyllaDB Alternator.
-        /// </summary>
-        /// <param name="seedUri">The seed URI as a string.</param>
-        /// <returns>The builder instance for method chaining.</returns>
-        public HelperOptionsBuilder WithSeedUri(string seedUri)
-        {
-            if (string.IsNullOrWhiteSpace(seedUri))
-            {
-                throw new ArgumentException("Seed URI cannot be null or empty.", nameof(seedUri));
-            }
-
-            this.options.SeedUri = new Uri(seedUri);
-            return this;
-        }
-
-        /// <summary>
         /// Sets the datacenter for rack and datacenter filtering.
         /// </summary>
         /// <param name="datacenter">The datacenter name.</param>
@@ -144,15 +117,94 @@ namespace ScyllaDB.Alternator
         }
 
         /// <summary>
+        /// Sets the initial nodes for connecting to ScyllaDB Alternator.
+        /// </summary>
+        /// <param name="initialNodes">The list of initial node hostnames or IPs.</param>
+        /// <returns>The builder instance for method chaining.</returns>
+        public HelperOptionsBuilder WithInitialNodeUri(Uri uri)
+        {
+            this.options.InitialNodes = new List<string> { uri.hostname.ToString() };
+            this.options.Port = uri.Port;
+            this.options.Schema = uri.Scheme;
+            return this;
+        }
+
+
+        /// <summary>
+        /// Sets the initial nodes for connecting to ScyllaDB Alternator.
+        /// </summary>
+        /// <param name="initialNodes">The list of initial node hostnames or IPs.</param>
+        /// <returns>The builder instance for method chaining.</returns>
+        public HelperOptionsBuilder WithInitialNodes(List<string> initialNodes)
+        {
+            this.options.InitialNodes = initialNodes ?? throw new ArgumentNullException(nameof(initialNodes));
+            return this;
+        }
+
+        /// <summary>
+        /// Sets the initial nodes for connecting to ScyllaDB Alternator.
+        /// </summary>
+        /// <param name="initialNodes">The array of initial node hostnames or IPs.</param>
+        /// <returns>The builder instance for method chaining.</returns>
+        public HelperOptionsBuilder WithInitialNodes(params string[] initialNodes)
+        {
+            if (initialNodes == null)
+            {
+                throw new ArgumentNullException(nameof(initialNodes));
+            }
+
+            this.options.InitialNodes = new List<string>(initialNodes);
+            return this;
+        }
+
+        /// <summary>
+        /// Adds an initial node to the list of nodes for connecting to ScyllaDB Alternator.
+        /// </summary>
+        /// <param name="node">The node hostname or IP to add.</param>
+        /// <returns>The builder instance for method chaining.</returns>
+        public HelperOptionsBuilder AddInitialNode(string node)
+        {
+            if (string.IsNullOrWhiteSpace(node))
+            {
+                throw new ArgumentException("Node cannot be null or empty.", nameof(node));
+            }
+
+            this.options.InitialNodes.Add(node);
+            return this;
+        }
+
+        /// <summary>
+        /// Sets the schema (protocol) for connecting to ScyllaDB Alternator.
+        /// </summary>
+        /// <param name="schema">The schema (http or https).</param>
+        /// <returns>The builder instance for method chaining.</returns>
+        public HelperOptionsBuilder WithSchema(string schema)
+        {
+            this.options.Schema = schema ?? throw new ArgumentNullException(nameof(schema));
+            return this;
+        }
+
+        /// <summary>
+        /// Sets the port for connecting to ScyllaDB Alternator.
+        /// </summary>
+        /// <param name="port">The port number.</param>
+        /// <returns>The builder instance for method chaining.</returns>
+        public HelperOptionsBuilder WithPort(int port)
+        {
+            this.options.Port = port;
+            return this;
+        }
+
+        /// <summary>
         /// Builds the HelperOptions instance.
         /// </summary>
         /// <returns>The configured HelperOptions.</returns>
         /// <exception cref="InvalidOperationException">Thrown when required properties are not set.</exception>
         public HelperOptions Build()
         {
-            if (this.options.SeedUri == null)
+            if (this.options.InitialNodes == null || this.options.InitialNodes.Count == 0)
             {
-                throw new InvalidOperationException("SeedUri must be set before building HelperOptions.");
+                throw new InvalidOperationException("Either InitialNodes must be set before building HelperOptions.");
             }
 
             return this.options;

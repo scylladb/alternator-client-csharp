@@ -12,21 +12,6 @@ namespace ScyllaDB.Alternator
         private readonly AlternatorLiveNodes liveNodes;
 
         /// <summary>
-        /// Initializes a new instance of the <see cref="Helper"/> class with the specified parameters.
-        /// </summary>
-        /// <param name="seedUri">The seed URI for connecting to ScyllaDB Alternator.</param>
-        /// <param name="datacenter">The datacenter name for filtering.</param>
-        /// <param name="rack">The rack name for filtering.</param>
-        public Helper(Uri seedUri, string datacenter, string rack)
-            : this(HelperOptionsBuilder.Create()
-                .WithSeedUri(seedUri)
-                .WithDatacenter(datacenter)
-                .WithRack(rack)
-                .Build())
-        {
-        }
-
-        /// <summary>
         /// Initializes a new instance of the <see cref="Helper"/> class with the specified options.
         /// </summary>
         /// <param name="options">The helper configuration options.</param>
@@ -37,12 +22,27 @@ namespace ScyllaDB.Alternator
                 throw new ArgumentNullException(nameof(options));
             }
 
-            if (options.SeedUri == null)
+            // Support both SeedUri (legacy) and InitialNodes (new) approaches
+            if (options.SeedUri != null)
             {
-                throw new ArgumentException("SeedUri cannot be null.", nameof(options));
+                // Legacy approach with single seed URI
+                this.liveNodes = new AlternatorLiveNodes(options.SeedUri, options.Datacenter, options.Rack);
             }
-
-            this.liveNodes = new AlternatorLiveNodes(options.SeedUri, options.Datacenter, options.Rack);
+            else if (options.InitialNodes != null && options.InitialNodes.Count > 0)
+            {
+                // New approach with multiple initial nodes
+                var nodeUris = new List<Uri>();
+                foreach (var node in options.InitialNodes)
+                {
+                    var uri = new Uri($"{options.Schema}://{node}:{options.Port}");
+                    nodeUris.Add(uri);
+                }
+                this.liveNodes = new AlternatorLiveNodes(nodeUris, options.Schema, options.Port, options.Datacenter, options.Rack);
+            }
+            else
+            {
+                throw new ArgumentException("Either SeedUri or InitialNodes must be provided.", nameof(options));
+            }
 
             if (options.ValidateOnInitialization)
             {
@@ -54,7 +54,8 @@ namespace ScyllaDB.Alternator
                     {
                         if (!this.liveNodes.CheckIfRackDatacenterFeatureIsSupported())
                         {
-                            Logger.Error($"server {options.SeedUri} does not support rack or datacenter filtering");
+                            var errorSource = options.SeedUri?.ToString() ?? string.Join(", ", options.InitialNodes);
+                            Logger.Error($"server {errorSource} does not support rack or datacenter filtering");
                         }
                     }
                 }
