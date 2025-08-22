@@ -26,11 +26,12 @@
     </ItemGroup>
 
     <ItemGroup>
-      <Folder Include="EndpointProvider\" />
+      <Compile Remove="UnitTests/**" />
+      <Compile Remove="IntegrationTests/**" />
     </ItemGroup>
 
     <ItemGroup>
-      <Content Include="Test\ScyllaDB.Alternator.Test.csproj" />
+      <Folder Include="EndpointProvider\" />
     </ItemGroup>
 
     <ItemGroup>

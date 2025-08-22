@@ -35,18 +35,20 @@ endif
 
 export PATH := $(GOBIN):$(PATH)
 
-COMPOSE := docker-compose -f $(MAKEFILE_PATH)/test/docker-compose.yml
+COMPOSE := docker-compose -f $(MAKEFILE_PATH)/IntegrationTests/docker-compose.yml
 
 .PHONY: clean
 clean:
 	dotnet clean ScyllaDB.Alternator.csproj
-	dotnet clean Test/ScyllaDB.Alternator.Test.csproj
-	rm -rf bin/ obj/ Test/bin/ Test/obj/
+	dotnet clean UnitTests/ScyllaDB.Alternator.Test.csproj
+	dotnet clean IntegrationTests/ScyllaDB.Alternator.Test.csproj
+	rm -rf bin/ obj/ UnitTests/bin/ UnitTests/obj/ IntegrationTests/bin/ IntegrationTests/obj/
 
 .PHONY: build
 build:
 	dotnet build ScyllaDB.Alternator.csproj --configuration Release
-	dotnet build Test/ScyllaDB.Alternator.Test.csproj --configuration Release
+	dotnet build UnitTests/ScyllaDB.Alternator.Test.csproj --configuration Release
+	dotnet build IntegrationTests/ScyllaDB.Alternator.Test.csproj --configuration Release
 
 .PHONY: clean-caches
 clean-caches:
@@ -71,15 +73,15 @@ test: build check test-unit test-integration
 
 .PHONY: test-unit
 test-unit:
-	dotnet test Test/ScyllaDB.Alternator.Test.csproj --filter "Category=Unit" --logger:"console;verbosity=normal"
+	dotnet test UnitTests/ScyllaDB.Alternator.Test.csproj --filter "Category=Unit" --logger:"console;verbosity=normal"
 
 .PHONY: test-integration
 test-integration: scylla-start
-	dotnet test Test/ScyllaDB.Alternator.Test.csproj --filter "Category=Integration" --logger:"console;verbosity=normal"
+	dotnet test IntegrationTests/ScyllaDB.Alternator.Test.csproj --filter "Category=Integration" --logger:"console;verbosity=normal"
 
 .PHONY: .prepare-cert
 .prepare-cert:
-	@[ -f "${MAKEFILE_PATH}/Test/scylla/db.key" ] || (echo "Prepare certificate" && cd ${MAKEFILE_PATH}/Test/scylla/ && openssl req -subj "/C=US/ST=Denial/L=Springfield/O=Dis/CN=www.example.com" -x509 -newkey rsa:4096 -keyout db.key -out db.crt -days 3650 -nodes && chmod 644 db.key)
+	@[ -f "${MAKEFILE_PATH}/IntegrationTests/scylla/db.key" ] || (echo "Prepare certificate" && cd ${MAKEFILE_PATH}/IntegrationTests/scylla/ && openssl req -subj "/C=US/ST=Denial/L=Springfield/O=Dis/CN=www.example.com" -x509 -newkey rsa:4096 -keyout db.key -out db.crt -days 3650 -nodes && chmod 644 db.key)
 
 .PHONY: scylla-start
 scylla-start: .prepare-cert $(GOBIN)/docker-compose

@@ -20,6 +20,7 @@ namespace ScyllaDB.Alternator
         }
 
         [Test]
+        [Category("Integration")]
         public async Task BasicTableTest([Values("", "dc1")] string datacenter, [Values("", "rack1")] string rack)
         {
             var credentials = new BasicAWSCredentials(this.user, this.password);

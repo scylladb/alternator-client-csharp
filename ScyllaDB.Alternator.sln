@@ -2,7 +2,9 @@
 Microsoft Visual Studio Solution File, Format Version 12.00
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ScyllaDB.Alternator", "ScyllaDB.Alternator.csproj", "{C8840517-C776-4765-8A2B-2989A66BE97D}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ScyllaDB.Alternator.Test", "Test/ScyllaDB.Alternator.Test.csproj", "{7D4CA20F-3CC6-48B7-8C91-3A023F2FA834}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ScyllaDB.Alternator.UnitTests", "UnitTests/ScyllaDB.Alternator.Test.csproj", "{7D4CA20F-3CC6-48B7-8C91-3A023F2FA834}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ScyllaDB.Alternator.IntegrationTests", "IntegrationTests/ScyllaDB.Alternator.Test.csproj", "{8E5CA30F-4DD7-49C8-9D92-4A024F3FA945}"
 EndProject
 
 Global
@@ -20,5 +22,10 @@ Global
 		{7D4CA20F-3CC6-48B7-8C91-3A023F2FA834}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{7D4CA20F-3CC6-48B7-8C91-3A023F2FA834}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{7D4CA20F-3CC6-48B7-8C91-3A023F2FA834}.Release|Any CPU.Build.0 = Release|Any CPU
+
+		{8E5CA30F-4DD7-49C8-9D92-4A024F3FA945}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{8E5CA30F-4DD7-49C8-9D92-4A024F3FA945}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{8E5CA30F-4DD7-49C8-9D92-4A024F3FA945}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{8E5CA30F-4DD7-49C8-9D92-4A024F3FA945}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 EndGlobal
