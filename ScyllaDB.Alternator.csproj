@@ -31,7 +31,7 @@
     </ItemGroup>
 
     <ItemGroup>
-      <Folder Include="EndpointProvider\" />
+      <Folder Include="Helper\" />
     </ItemGroup>
 
     <ItemGroup>

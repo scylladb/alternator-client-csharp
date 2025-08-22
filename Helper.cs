@@ -1,4 +1,4 @@
-// <copyright file="EndpointProvider.cs" company="PlaceholderCompany">
+// <copyright file="Helper.cs" company="PlaceholderCompany">
 // Copyright (c) PlaceholderCompany. All rights reserved.
 // </copyright>
 
@@ -6,12 +6,12 @@ namespace ScyllaDB.Alternator
 {
     using Amazon.Runtime.Endpoints;
 
-    public class EndpointProvider : IEndpointProvider
+    public class Helper : IEndpointProvider
     {
         private static readonly NLog.Logger Logger = NLog.LogManager.GetCurrentClassLogger();
         private readonly AlternatorLiveNodes liveNodes;
 
-        public EndpointProvider(Uri seedUri, string datacenter, string rack)
+        public Helper(Uri seedUri, string datacenter, string rack)
         {
             this.liveNodes = new AlternatorLiveNodes(seedUri, datacenter, rack);
             try
@@ -28,7 +28,7 @@ namespace ScyllaDB.Alternator
             }
             catch (Exception e)
             {
-                throw new SystemException("failed to start EndpointProvider", e);
+                throw new SystemException("failed to start Helper", e);
             }
 
             this.liveNodes.Start(CancellationToken.None);

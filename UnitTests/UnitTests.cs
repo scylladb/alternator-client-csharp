@@ -17,28 +17,28 @@ namespace ScyllaDB.Alternator
         }
 
         [Test]
-        public void EndpointProviderConstructorTest()
+        public void HelperConstructorTest()
         {
-            // Test EndpointProvider constructor
+            // Test Helper constructor
             var uri = new Uri("http://127.0.0.1:8080");
             var datacenter = "dc1";
             var rack = "rack1";
 
-            var provider = new EndpointProvider(uri, datacenter, rack);
+            var provider = new Helper(uri, datacenter, rack);
 
             Assert.That(provider, Is.Not.Null);
         }
 
         [Test]
         [Category("Unit")]
-        public void EndpointProviderConstructorWithEmptyValuesTest()
+        public void HelperConstructorWithEmptyValuesTest()
         {
-            // Test EndpointProvider constructor with empty datacenter and rack
+            // Test Helper constructor with empty datacenter and rack
             var uri = new Uri("http://127.0.0.1:8080");
             var datacenter = string.Empty;
             var rack = string.Empty;
 
-            var provider = new EndpointProvider(uri, datacenter, rack);
+            var provider = new Helper(uri, datacenter, rack);
 
             Assert.That(provider, Is.Not.Null);
         }
