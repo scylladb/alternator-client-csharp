@@ -22,13 +22,7 @@ namespace ScyllaDB.Alternator
                 throw new ArgumentNullException(nameof(options));
             }
 
-            // Support both SeedUri (legacy) and InitialNodes (new) approaches
-            if (options.SeedUri != null)
-            {
-                // Legacy approach with single seed URI
-                this.liveNodes = new AlternatorLiveNodes(options.SeedUri, options.Datacenter, options.Rack);
-            }
-            else if (options.InitialNodes != null && options.InitialNodes.Count > 0)
+            if (options.InitialNodes != null && options.InitialNodes.Count > 0)
             {
                 // New approach with multiple initial nodes
                 var nodeUris = new List<Uri>();
@@ -41,7 +35,7 @@ namespace ScyllaDB.Alternator
             }
             else
             {
-                throw new ArgumentException("Either SeedUri or InitialNodes must be provided.", nameof(options));
+                throw new ArgumentException("InitialNodes must be provided.", nameof(options));
             }
 
             if (options.ValidateOnInitialization)
