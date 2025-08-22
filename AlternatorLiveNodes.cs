@@ -16,7 +16,7 @@ namespace ScyllaDB.Alternator
         private static readonly NLog.Logger Logger = NLog.LogManager.GetCurrentClassLogger();
         private readonly string alternatorScheme;
         private readonly int alternatorPort;
-        private readonly ReaderWriterLockSlim liveNodesLock = new ();
+        private readonly ReaderWriterLockSlim liveNodesLock = new ReaderWriterLockSlim();
         private readonly List<Uri> initialNodes;
         private readonly string rack;
         private readonly string datacenter;
