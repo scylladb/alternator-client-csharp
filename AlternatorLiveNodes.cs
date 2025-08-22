@@ -17,6 +17,17 @@ namespace ScyllaDB.Alternator
 
     public class AlternatorLiveNodes
     {
+        private static readonly NLog.Logger Logger = NLog.LogManager.GetCurrentClassLogger();
+        private readonly string alternatorScheme;
+        private readonly int alternatorPort;
+        private readonly ReaderWriterLockSlim liveNodesLock = new ();
+        private readonly List<Uri> initialNodes;
+        private readonly string rack;
+        private readonly string datacenter;
+        private List<Uri> liveNodes;
+        private int nextLiveNodeIndex;
+        private bool started;
+
         public AlternatorLiveNodes(Uri liveNode, string datacenter, string rack)
             : this(new List<Uri> { liveNode }, liveNode.Scheme, liveNode.Port, datacenter, rack)
         {
@@ -139,16 +150,11 @@ namespace ScyllaDB.Alternator
             }
         }
 
-        private static readonly NLog.Logger Logger = NLog.LogManager.GetCurrentClassLogger();
-        private readonly string alternatorScheme;
-        private readonly int alternatorPort;
-        private readonly ReaderWriterLockSlim liveNodesLock = new ();
-        private readonly List<Uri> initialNodes;
-        private readonly string rack;
-        private readonly string datacenter;
-        private List<Uri> liveNodes;
-        private int nextLiveNodeIndex;
-        private bool started;
+        private static string StreamToString(Stream stream)
+        {
+            using var reader = new StreamReader(stream);
+            return reader.ReadToEnd();
+        }
 
         private void UpdateCycle(CancellationToken cancellationToken)
         {
@@ -222,12 +228,6 @@ namespace ScyllaDB.Alternator
             }
 
             return new Uri($"{uri.Scheme}://{uri.Host}:{uri.Port}{path}?{query}");
-        }
-
-        private static string StreamToString(Stream stream)
-        {
-            using var reader = new StreamReader(stream);
-            return reader.ReadToEnd();
         }
 
         private void UpdateLiveNodes()
@@ -307,32 +307,6 @@ namespace ScyllaDB.Alternator
             }
 
             return this.NextAsUri("/localnodes", query);
-        }
-
-        public class ValidationError : Exception
-        {
-            public ValidationError(string message)
-                : base(message)
-            {
-            }
-
-            public ValidationError(string message, Exception cause)
-                : base(message, cause)
-            {
-            }
-        }
-
-        public class FailedToCheck : Exception
-        {
-            public FailedToCheck(string message, Exception cause)
-                : base(message, cause)
-            {
-            }
-
-            public FailedToCheck(string message)
-                : base(message)
-            {
-            }
         }
     }
 }
