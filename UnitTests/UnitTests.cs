@@ -1,4 +1,4 @@
-// <copyright file="Test.cs" company="PlaceholderCompany">
+// <copyright file="UnitTests.cs" company="PlaceholderCompany">
 // Copyright (c) PlaceholderCompany. All rights reserved.
 // </copyright>
 
@@ -9,9 +9,9 @@ namespace ScyllaDB.Alternator
     using Amazon.Runtime;
 
     [TestFixture]
-    public class Test
+    public class UnitTests
     {
-        public Test()
+        public UnitTests()
         {
         }
 

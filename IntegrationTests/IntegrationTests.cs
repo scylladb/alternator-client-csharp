@@ -1,4 +1,4 @@
-// <copyright file="Test.cs" company="PlaceholderCompany">
+// <copyright file="IntegrationTests.cs" company="PlaceholderCompany">
 // Copyright (c) PlaceholderCompany. All rights reserved.
 // </copyright>
 
@@ -9,13 +9,13 @@ namespace ScyllaDB.Alternator
     using Amazon.Runtime;
 
     [TestFixture]
-    public class Test
+    public class IntegrationTests
     {
         private readonly string user = TestContext.Parameters.Get("User", "none");
         private readonly string password = TestContext.Parameters.Get("Password", "none");
         private readonly string endpoint = TestContext.Parameters.Get("Endpoint", "http://127.0.0.1:8080");
 
-        public Test()
+        public IntegrationTests()
         {
         }
 
