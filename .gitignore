@@ -1,0 +1,59 @@
+
+#Ignore thumbnails created by windows
+Thumbs.db
+#Ignore files build by Visual Studio
+*.obj
+*.exe
+*.pdb
+*.user
+*.aps
+*.pch
+*.vspscc
+*_i.c
+*_p.c
+*.ncb
+*.suo
+*.tmp
+*.TMP
+*.tlb
+*.tlh
+*.bak
+*.cache
+*.ilk
+*.log
+*.lock.json
+.vs/
+[Bb]in
+[Dd]ebug*/
+*.lib
+*.sbr
+obj/
+[Rr]elease*/
+_ReSharper*/
+[Tt]est[Rr]esult*
+bin/
+**/obj/
+**/Debug/
+obj/
+
+#Ignore packages from sample projects
+src/**/packages
+
+# OS X
+.DS_Store
+
+# Rider
+.idea/
+
+# Visual Studio for Mac
+*.userprefs
+
+# Ignore active snk file
+build/scylladb.snk
+
+# Ignore python virtual environments
+.venv
+
+# Ignore release leftovers
+nupkgs/
+
