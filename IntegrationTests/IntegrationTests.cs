@@ -9,6 +9,7 @@ namespace ScyllaDB.Alternator
     using Amazon.Runtime;
 
     [TestFixture]
+    [Category("Integration")]
     public class IntegrationTests
     {
         private readonly string user = TestContext.Parameters.Get("User", "none");
@@ -20,7 +21,6 @@ namespace ScyllaDB.Alternator
         }
 
         [Test]
-        [Category("Integration")]
         public async Task BasicTableTest([Values("", "dc1")] string datacenter, [Values("", "rack1")] string rack)
         {
             var credentials = new BasicAWSCredentials(this.user, this.password);

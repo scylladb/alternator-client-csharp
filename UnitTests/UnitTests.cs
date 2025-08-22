@@ -9,6 +9,7 @@ namespace ScyllaDB.Alternator
     using Amazon.Runtime;
 
     [TestFixture]
+    [Category("Unit")]
     public class UnitTests
     {
         public UnitTests()
@@ -16,7 +17,6 @@ namespace ScyllaDB.Alternator
         }
 
         [Test]
-        [Category("Unit")]
         public void EndpointProviderConstructorTest()
         {
             // Test EndpointProvider constructor
