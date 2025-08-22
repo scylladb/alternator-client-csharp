@@ -117,18 +117,17 @@ namespace ScyllaDB.Alternator
         }
 
         /// <summary>
-        /// Sets the initial nodes for connecting to ScyllaDB Alternator.
+        /// Sets the initial nodes, schema and port for connecting to ScyllaDB Alternator from provided Uri.
         /// </summary>
-        /// <param name="initialNodes">The list of initial node hostnames or IPs.</param>
+        /// <param name="uri">Uri of the single initial node.</param>
         /// <returns>The builder instance for method chaining.</returns>
         public HelperOptionsBuilder WithInitialNodeUri(Uri uri)
         {
-            this.options.InitialNodes = new List<string> { uri.hostname.ToString() };
+            this.options.InitialNodes = new List<string> { uri.Host };
             this.options.Port = uri.Port;
             this.options.Schema = uri.Scheme;
             return this;
         }
-
 
         /// <summary>
         /// Sets the initial nodes for connecting to ScyllaDB Alternator.

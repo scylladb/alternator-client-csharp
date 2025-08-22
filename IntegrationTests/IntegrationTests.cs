@@ -53,7 +53,12 @@ namespace ScyllaDB.Alternator
         // Alternator-specific DynamoDB connection
         private static AmazonDynamoDBClient GetAlternatorClient(Uri uri, AWSCredentials credentials, string datacenter, string rack)
         {
-            var handler = new Helper(uri, datacenter, rack);
+            var handler = new Helper(
+                HelperOptionsBuilder.Create()
+                    .WithInitialNodeUri(uri)
+                    .WithDatacenter(datacenter)
+                    .WithRack(rack)
+                    .Build());
             var config = new AmazonDynamoDBConfig
             {
                 RegionEndpoint = Amazon.RegionEndpoint.USEast1,

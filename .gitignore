@@ -56,4 +56,6 @@ build/scylladb.snk
 
 # Ignore release leftovers
 nupkgs/
+IntegrationTests/scylla/*.crt
+IntegrationTests/scylla/*.key
 

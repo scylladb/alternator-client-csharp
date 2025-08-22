@@ -31,6 +31,7 @@ namespace ScyllaDB.Alternator
                     var uri = new Uri($"{options.Schema}://{node}:{options.Port}");
                     nodeUris.Add(uri);
                 }
+
                 this.liveNodes = new AlternatorLiveNodes(nodeUris, options.Schema, options.Port, options.Datacenter, options.Rack);
             }
             else
@@ -48,8 +49,7 @@ namespace ScyllaDB.Alternator
                     {
                         if (!this.liveNodes.CheckIfRackDatacenterFeatureIsSupported())
                         {
-                            var errorSource = options.SeedUri?.ToString() ?? string.Join(", ", options.InitialNodes);
-                            Logger.Error($"server {errorSource} does not support rack or datacenter filtering");
+                            Logger.Error($"server does not support rack or datacenter filtering");
                         }
                     }
                 }
