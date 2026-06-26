@@ -75,7 +75,7 @@ namespace ScyllaDB.Alternator
 
             var target = queryPlan.Next();
             requestContext.Request.Endpoint = target;
-            requestContext.Request.Headers["Host"] = target.IsDefaultPort ? target.Host : $"{target.Host}:{target.Port}";
+            requestContext.Request.Headers["Host"] = target.Authority;
             requestContext.Request.Headers["Connection"] = "keep-alive";
         }
     }

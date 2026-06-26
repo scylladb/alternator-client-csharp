@@ -149,6 +149,30 @@ namespace ScyllaDB.Alternator
         }
 
         [Test]
+        public void PollingRequestFormatsIpv6HostHeadersAndDiscoveredNodesTest()
+        {
+            var handler = new TrackingHttpMessageHandler("[\"::2\"]");
+            using var pollingHttpClient = new HttpClient(handler);
+            var config = AlternatorConfig.builder()
+                .withSeedHost("::1")
+                .withScheme("http")
+                .withPort(8080)
+                .withRoutingScope(ClusterScope.create())
+                .build();
+            var liveNodes = new AlternatorLiveNodes(config, pollingHttpClient);
+
+            InvokeUpdateLiveNodes(liveNodes);
+
+            Assert.That(handler.LastRequestUri, Is.EqualTo(new Uri("http://[::1]:8080/localnodes")));
+            Assert.That(handler.LastHostHeader, Is.EqualTo("[::1]:8080"));
+            Assert.That(liveNodes.getLiveNodes(), Is.EqualTo(new[]
+            {
+                new Uri("http://[::2]:8080"),
+                new Uri("http://[::1]:8080"),
+            }));
+        }
+
+        [Test]
         public void ConstructorValidatesConfigurationLikeJavaTest()
         {
             var config = AlternatorConfig.builder()
@@ -334,19 +358,31 @@ namespace ScyllaDB.Alternator
 
         private sealed class TrackingHttpMessageHandler : HttpMessageHandler
         {
+            private readonly string responseBody;
             private int disposeCount;
             private int sendCount;
+
+            internal TrackingHttpMessageHandler(string responseBody = "[\"127.0.0.2\"]")
+            {
+                this.responseBody = responseBody;
+            }
 
             internal int DisposeCount => this.disposeCount;
 
             internal int SendCount => this.sendCount;
 
+            internal Uri? LastRequestUri { get; private set; }
+
+            internal string? LastHostHeader { get; private set; }
+
             protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
             {
                 Interlocked.Increment(ref this.sendCount);
+                this.LastRequestUri = request.RequestUri;
+                this.LastHostHeader = request.Headers.Host;
                 return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
                 {
-                    Content = new StringContent("[\"127.0.0.2\"]", Encoding.UTF8, "application/json"),
+                    Content = new StringContent(this.responseBody, Encoding.UTF8, "application/json"),
                 });
             }
 
