@@ -1,0 +1,39 @@
+name: Continuous Integration
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - README.md
+
+  pull_request:
+    paths-ignore:
+      - README.md
+
+env:
+  IS_CICD: 1
+
+jobs:
+  build-and-test:
+    name: Build and Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore
+        run: dotnet restore ScyllaDB.Alternator.sln --verbosity minimal
+
+      - name: Build
+        run: make build
+
+      - name: Check formatting
+        run: make check
+
+      - name: Run unit tests
+        run: make test-unit
