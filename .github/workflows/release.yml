@@ -1,0 +1,76 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        type: boolean
+        description: 'dry-run: build package without pushing to NuGet'
+        default: false
+
+      skip-tests:
+        type: boolean
+        description: 'skip-tests: do not run tests while releasing'
+        default: false
+
+      target-tag:
+        type: string
+        description: 'target-tag: tag or branch name to release. Use to re-release tagged releases'
+        default: main
+
+      release-version:
+        required: false
+        type: string
+        description: 'release-version: override package version'
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    env:
+      IS_CICD: 1
+      RELEASE_SKIP_TESTS: ${{ inputs.skip-tests }}
+      RELEASE_VERSION: ${{ inputs.release-version }}
+      RELEASE_TARGET_TAG: ${{ inputs.target-tag }}
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.target-tag }}
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Checkout Code One Commit Before ${{ inputs.target-tag }}
+        if: inputs.target-tag != 'main'
+        run: make checkout-one-commit-before
+
+      - name: Restore
+        run: dotnet restore ScyllaDB.Alternator.sln --verbosity minimal
+
+      - name: Prepare release
+        run: make release-prepare
+
+      - name: Perform release
+        if: inputs.dry-run == false
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        run: make release-push
+
+      - name: Perform release dry-run
+        if: inputs.dry-run == true
+        run: make release-dry-run-summary
+
+      - name: Upload NuGet package
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nuget-package
+          path: nupkgs/*.nupkg
