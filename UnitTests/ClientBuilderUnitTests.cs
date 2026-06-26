@@ -340,6 +340,28 @@ namespace ScyllaDB.Alternator
         }
 
         [Test]
+        public void AlternatorDynamoDBClientBuilderWithOptionsUsesEffectiveConfigForLiveNodesTest()
+        {
+            var strictTlsConfig = TlsConfig.systemDefault();
+            var options = HelperOptionsBuilder.Create()
+                .WithInitialNodeUri(new Uri("https://127.0.0.1:8181"))
+                .WithTlsConfig(strictTlsConfig)
+                .WithoutValidation()
+                .WithDeferredStart()
+                .Build();
+
+            using var wrapper = AlternatorDynamoDBClient.builder()
+                .WithOptions(options)
+                .WithDisableCertificateChecks()
+                .buildWithAlternatorAPI();
+
+            var liveNodesConfig = GetAlternatorLiveNodesConfig(wrapper.getAlternatorLiveNodes());
+            Assert.That(wrapper.Config.getTlsConfig().isTrustAllCertificates(), Is.True);
+            Assert.That(liveNodesConfig.getTlsConfig().isTrustAllCertificates(), Is.True);
+            Assert.That(wrapper.getAlternatorLiveNodes().isRunning(), Is.False);
+        }
+
+        [Test]
         public void AlternatorDynamoDBClientBuilderSupportsAwsBuilderParityMethodsTest()
         {
             var builder = AlternatorDynamoDBClient.builder()
@@ -637,6 +659,17 @@ namespace ScyllaDB.Alternator
 
             Assert.That(wrapper.PartitionKeyResolver, Is.Not.Null);
             Assert.That(wrapper.getAlternatorConfig(), Is.SameAs(wrapper.Config));
+        }
+
+        private static AlternatorConfig GetAlternatorLiveNodesConfig(AlternatorLiveNodes liveNodes)
+        {
+            var field = typeof(AlternatorLiveNodes).GetField(
+                "config",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+            Assert.That(field, Is.Not.Null);
+            var value = field!.GetValue(liveNodes);
+            Assert.That(value, Is.Not.Null);
+            return (AlternatorConfig)value!;
         }
 
         private static async Task WaitUntilAsync(Func<bool> condition)

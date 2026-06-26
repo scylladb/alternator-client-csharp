@@ -897,7 +897,11 @@ namespace ScyllaDB.Alternator
             var dynamoDbConfig = this.GetOrCreateDynamoDbConfig();
             this.ValidateHttpClientConfiguration(dynamoDbConfig);
             var endpointProvider = this.options != null
-                ? new Helper(this.options)
+                ? new Helper(
+                    alternatorConfig,
+                    this.options.ValidateOnInitialization,
+                    this.options.StartImmediately,
+                    this.options.CancellationToken)
                 : new Helper(alternatorConfig, this.validateOnInitialization, this.startImmediately, this.cancellationToken);
 
             if (alternatorConfig.ConnectionTimeoutMs > 0)
