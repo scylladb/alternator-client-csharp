@@ -211,6 +211,22 @@ TlsConfig trustAll = TlsConfig.trustAll();
 TlsConfig systemDefault = TlsConfig.systemDefault();
 ```
 
+TLS session resumption, including TLS session tickets when the server supports
+them, is enabled by default on the default .NET `SocketsHttpHandler` transport.
+It can be disabled explicitly:
+
+```csharp
+var tls = TlsConfig.builder()
+    .withTlsSessionResumption(false)
+    .build();
+```
+
+.NET exposes the TLS resumption enable/disable switch but does not expose
+portable session ticket cache size or timeout controls through `HttpClient`.
+Use the default `SocketsHttpHandler` transport for this setting; the legacy
+`withHttpClientHandlerCustomizer(...)` path uses platform defaults and cannot
+disable TLS resumption.
+
 ## Compression and Header Optimization
 
 Request compression is installed in the AWS SDK runtime pipeline before request signing.

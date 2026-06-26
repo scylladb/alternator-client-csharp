@@ -64,6 +64,12 @@ namespace ScyllaDB.Alternator
             int maxConnections,
             Action<HttpClientHandler>? configureHandler = null)
         {
+            if (!tlsConfig.TlsSessionResumptionEnabled)
+            {
+                throw new NotSupportedException(
+                    "Disabling TLS session resumption is only supported by the default SocketsHttpHandler transport.");
+            }
+
             var handler = new HttpClientHandler
             {
                 MaxConnectionsPerServer = maxConnections,
@@ -94,6 +100,7 @@ namespace ScyllaDB.Alternator
                 PooledConnectionIdleTimeout = ToTimeout(config.ConnectionMaxIdleTimeMs),
                 PooledConnectionLifetime = ToTimeout(config.ConnectionTimeToLiveMs),
             };
+            handler.SslOptions.AllowTlsResume = config.TlsConfig.TlsSessionResumptionEnabled;
 
             if (config.ConnectionTimeoutMs > 0)
             {

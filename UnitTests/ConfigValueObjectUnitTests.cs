@@ -70,6 +70,7 @@ namespace ScyllaDB.Alternator
                 .withCaCertPath("/tmp/ca.pem")
                 .withClientCertificate("/tmp/client.crt", "/tmp/client.key")
                 .withTrustSystemCaCerts(false)
+                .withTlsSessionResumption(false)
                 .build();
 
             Assert.That(tls.getCustomCaCertPaths(), Is.EqualTo(new[] { "/tmp/ca.pem" }));
@@ -77,8 +78,11 @@ namespace ScyllaDB.Alternator
             Assert.That(tls.isTrustSystemCaCerts(), Is.False);
             Assert.That(tls.isTrustAllCertificates(), Is.False);
             Assert.That(tls.isVerifyHostname(), Is.True);
+            Assert.That(tls.isTlsSessionResumptionEnabled(), Is.False);
             Assert.That(TlsConfig.trustAll().isTrustAllCertificates(), Is.True);
+            Assert.That(TlsConfig.trustAll().isTlsSessionResumptionEnabled(), Is.True);
             Assert.That(TlsConfig.systemDefault().isTrustSystemCaCerts(), Is.True);
+            Assert.That(TlsConfig.systemDefault().isTlsSessionResumptionEnabled(), Is.True);
         }
 
         [Test]
