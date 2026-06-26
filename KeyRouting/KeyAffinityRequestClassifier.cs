@@ -103,32 +103,37 @@ namespace ScyllaDB.Alternator.KeyRouting
 
                 foreach (var write in table.Value)
                 {
-                    if (write.PutRequest != null)
+                    if (write == null)
                     {
-                        candidates.Add(new BatchWriteRoutingTarget(
-                            table.Key,
-                            write.PutRequest.Item,
-                            "PutRequest",
-                            CanonicalAttributeValues(write.PutRequest.Item)));
+                        continue;
                     }
 
-                    if (write.DeleteRequest != null)
+                    var putRequest = write.PutRequest;
+                    var deleteRequest = write.DeleteRequest;
+                    var putValues = putRequest?.Item;
+                    var deleteValues = deleteRequest?.Key;
+                    if (putRequest != null && deleteRequest == null && putValues != null && putValues.Count > 0)
                     {
                         candidates.Add(new BatchWriteRoutingTarget(
                             table.Key,
-                            write.DeleteRequest.Key,
+                            putValues,
+                            "PutRequest",
+                            CanonicalAttributeValues(putValues)));
+                        continue;
+                    }
+
+                    if (deleteRequest != null && putRequest == null && deleteValues != null && deleteValues.Count > 0)
+                    {
+                        candidates.Add(new BatchWriteRoutingTarget(
+                            table.Key,
+                            deleteValues,
                             "DeleteRequest",
-                            CanonicalAttributeValues(write.DeleteRequest.Key)));
+                            CanonicalAttributeValues(deleteValues)));
                     }
                 }
             }
 
-            return candidates
-                .OrderBy(target => target.TableName, StringComparer.Ordinal)
-                .ThenBy(target => target.CanonicalAttributes, StringComparer.Ordinal)
-                .ThenBy(target => target.Operation, StringComparer.Ordinal)
-                .ToList()
-                .AsReadOnly();
+            return candidates.AsReadOnly();
         }
 
 #pragma warning disable SA1300, IDE1006
