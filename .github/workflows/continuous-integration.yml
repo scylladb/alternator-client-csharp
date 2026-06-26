@@ -5,18 +5,22 @@ on:
     branches:
       - main
     paths-ignore:
+      - .github/workflows/call_jira_sync.yml
+      - .github/workflows/release.yml
       - README.md
 
   pull_request:
     paths-ignore:
+      - .github/workflows/call_jira_sync.yml
+      - .github/workflows/release.yml
       - README.md
 
 env:
   IS_CICD: 1
 
 jobs:
-  build-and-test:
-    name: Build and Test
+  lint:
+    name: Lint
     runs-on: ubuntu-latest
 
     steps:
@@ -26,14 +30,77 @@ jobs:
         with:
           dotnet-version: 8.0.x
 
+      - name: Check formatting
+        run: make check
+
+  build-and-test:
+    name: Build and Test (.NET ${{ matrix.dotnet-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        dotnet-version: [8.0.x]
+      fail-fast: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ matrix.dotnet-version }}
+
       - name: Restore
         run: dotnet restore ScyllaDB.Alternator.sln --verbosity minimal
 
       - name: Build
         run: make build
 
-      - name: Check formatting
-        run: make check
+      - name: Pack and try installing NuGet package
+        run: make try-get
+
+      - name: Upload NuGet package
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuget-package-dotnet-${{ matrix.dotnet-version }}
+          path: nupkgs/*.nupkg
 
       - name: Run unit tests
         run: make test-unit
+
+      - name: Upload unit test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: unit-test-results-dotnet-${{ matrix.dotnet-version }}
+          path: UnitTests/TestResults/**/*.trx
+
+      - name: Cache Docker image
+        id: docker-cache
+        uses: actions/cache@v4
+        with:
+          path: .docker-cache
+          key: scylla-docker-${{ hashFiles('IntegrationTests/docker-compose.yml') }}
+
+      - name: Save Docker image to cache
+        if: steps.docker-cache.outputs.cache-hit != 'true'
+        run: make docker-cache-save
+
+      - name: Cache certificates
+        id: cert-cache
+        uses: actions/cache@v4
+        with:
+          path: .cert-cache
+          key: scylla-certs-${{ hashFiles('Makefile') }}
+
+      - name: Save certificates to cache
+        if: steps.cert-cache.outputs.cache-hit != 'true'
+        run: make cert-cache-save
+
+      - name: Run integration tests
+        run: make test-integration
+
+      - name: Upload integration test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integration-test-results-dotnet-${{ matrix.dotnet-version }}
+          path: IntegrationTests/TestResults/**/*.trx
