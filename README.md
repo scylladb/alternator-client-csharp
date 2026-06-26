@@ -90,6 +90,27 @@ AmazonDynamoDBClient client = AlternatorDynamoDBClient.builder()
     .build();
 ```
 
+For cluster-wide routing in a multi-datacenter deployment, configure working seed
+hosts from every datacenter. `ClusterScope.create()` uses the bare `/localnodes`
+endpoint, and Alternator returns the nodes visible from the node that handled
+that request. With only one seed, discovery usually covers only that seed node's
+datacenter, so cluster scope will not route across datacenters unless the client
+is given reachable seeds from all datacenters.
+
+```csharp
+AmazonDynamoDBClient client = AlternatorDynamoDBClient.builder()
+    .withScheme("https")
+    .withPort(8043)
+    .withInitialSeeds(
+        "dc1-seed.example.com",
+        "dc2-seed.example.com")
+    .withRoutingScope(ClusterScope.create())
+    .build();
+```
+
+Seeds passed to `withInitialSeeds(...)` are DNS names or IP addresses only. The
+scheme and port are shared by all seeds and are configured separately.
+
 Legacy datacenter/rack helpers remain available:
 
 ```csharp

@@ -90,6 +90,31 @@ namespace ScyllaDB.Alternator
             return this.EndpointOverride(new Uri(endpointOverride));
         }
 
+        public AlternatorDynamoDBClientBuilder WithInitialSeeds(IEnumerable<string> seedHosts)
+        {
+            if (seedHosts == null)
+            {
+                throw new ArgumentNullException(nameof(seedHosts));
+            }
+
+            return this.ConfigureInitialSeedHosts(seedHosts, nameof(seedHosts));
+        }
+
+        public AlternatorDynamoDBClientBuilder WithInitialSeeds(params string[] seedHosts)
+        {
+            if (seedHosts == null)
+            {
+                throw new ArgumentNullException(nameof(seedHosts));
+            }
+
+            return this.ConfigureInitialSeedHosts(seedHosts, nameof(seedHosts));
+        }
+
+        public AlternatorDynamoDBClientBuilder WithScheme(string scheme)
+        {
+            return this.WithSchema(scheme);
+        }
+
 #pragma warning disable SA1300, IDE1006
         public AlternatorDynamoDBClientBuilder endpointOverride(Uri endpointOverride)
         {
@@ -99,6 +124,31 @@ namespace ScyllaDB.Alternator
         public AlternatorDynamoDBClientBuilder endpointOverride(string endpointOverride)
         {
             return this.EndpointOverride(endpointOverride);
+        }
+
+        public AlternatorDynamoDBClientBuilder withInitialSeeds(IEnumerable<string> seedHosts)
+        {
+            return this.WithInitialSeeds(seedHosts);
+        }
+
+        public AlternatorDynamoDBClientBuilder withInitialSeeds(params string[] seedHosts)
+        {
+            return this.WithInitialSeeds(seedHosts);
+        }
+
+        public AlternatorDynamoDBClientBuilder withScheme(string scheme)
+        {
+            return this.WithScheme(scheme);
+        }
+
+        public AlternatorDynamoDBClientBuilder withSchema(string schema)
+        {
+            return this.WithSchema(schema);
+        }
+
+        public AlternatorDynamoDBClientBuilder withPort(int port)
+        {
+            return this.WithPort(port);
         }
 
         public AlternatorDynamoDBClientBuilder credentialsProvider(AWSCredentials credentials)
@@ -506,7 +556,7 @@ namespace ScyllaDB.Alternator
         public AlternatorDynamoDBClientBuilder EndpointProvider(IEndpointProvider endpointProvider)
         {
             throw new NotSupportedException(
-                "AlternatorDynamoDBClient does not support custom endpoint providers. Use EndpointOverride(Uri) to specify the seed endpoint instead.");
+                "AlternatorDynamoDBClient does not support custom endpoint providers. Use EndpointOverride(Uri) for one seed, or WithInitialSeeds(...) with WithScheme(...) and WithPort(...) for multiple seeds.");
         }
 
         public AlternatorDynamoDBClientBuilder EndpointDiscoveryEnabled(bool endpointDiscoveryEnabled)
@@ -805,6 +855,30 @@ namespace ScyllaDB.Alternator
                 .Build();
         }
 
+        private static List<string> NormalizeInitialSeedHosts(IEnumerable<string> seedHosts, string paramName)
+        {
+            var hosts = new List<string>();
+            foreach (var seedHost in seedHosts)
+            {
+                if (string.IsNullOrWhiteSpace(seedHost))
+                {
+                    throw new ArgumentException("Initial seed host cannot be null or empty.", paramName);
+                }
+
+                var host = seedHost.Trim();
+                if (Uri.CheckHostName(host) == UriHostNameType.Unknown)
+                {
+                    throw new ArgumentException(
+                        "Initial seed must be a DNS name or IP address without scheme or port.",
+                        paramName);
+                }
+
+                hosts.Add(host);
+            }
+
+            return hosts;
+        }
+
         private ClientArtifacts BuildClientArtifacts()
         {
             this.configBuilder.WithAuthenticationEnabled(this.credentials != null);
@@ -867,8 +941,33 @@ namespace ScyllaDB.Alternator
             if (alternatorConfig.SeedHosts.Count == 0)
             {
                 throw new InvalidOperationException(
-                    "endpointOverride must be set when using AlternatorDynamoDBClientBuilder. Call endpointOverride(Uri) with the seed Alternator node URI.");
+                    "endpointOverride or withInitialSeeds must be set when using AlternatorDynamoDBClientBuilder. Call endpointOverride(Uri) for one seed, or withInitialSeeds(...) with DNS/IP seed hosts.");
             }
+
+            if (string.IsNullOrWhiteSpace(alternatorConfig.Scheme))
+            {
+                throw new InvalidOperationException(
+                    "Alternator scheme must be set. Call endpointOverride(Uri) or withScheme(string).");
+            }
+
+            if (alternatorConfig.Port <= 0)
+            {
+                throw new InvalidOperationException(
+                    "Alternator port must be set. Call endpointOverride(Uri) or withPort(int).");
+            }
+        }
+
+        private AlternatorDynamoDBClientBuilder ConfigureInitialSeedHosts(IEnumerable<string> seedHosts, string paramName)
+        {
+            var hosts = NormalizeInitialSeedHosts(seedHosts, paramName);
+            if (hosts.Count == 0)
+            {
+                throw new ArgumentException("At least one initial seed host must be provided.", paramName);
+            }
+
+            this.optionsBuilder.WithInitialNodes(hosts);
+            this.configBuilder.WithSeedHosts(hosts);
+            return this;
         }
 
         private void ValidateHttpClientConfiguration(AmazonDynamoDBConfig dynamoDbConfig)

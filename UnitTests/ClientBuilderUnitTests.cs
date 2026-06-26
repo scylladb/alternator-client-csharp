@@ -67,6 +67,66 @@ namespace ScyllaDB.Alternator
         }
 
         [Test]
+        public void AlternatorDynamoDBClientBuilderSupportsInitialSeedsTest()
+        {
+            using var wrapper = AlternatorDynamoDBClient.builder()
+                .withScheme("https")
+                .withPort(8043)
+                .withInitialSeeds(
+                    "dc1-seed.example.com",
+                    "dc2-seed.example.com")
+                .withRoutingScope(ClusterScope.create())
+                .WithoutValidation()
+                .WithDeferredStart()
+                .buildWithAlternatorAPI();
+
+            Assert.That(wrapper.Config.getSeedHosts(), Is.EqualTo(new[] { "dc1-seed.example.com", "dc2-seed.example.com" }));
+            Assert.That(wrapper.Config.getScheme(), Is.EqualTo("https"));
+            Assert.That(wrapper.Config.getPort(), Is.EqualTo(8043));
+            Assert.That(wrapper.getLiveNodes(), Is.EqualTo(new[]
+            {
+                new Uri("https://dc1-seed.example.com:8043"),
+                new Uri("https://dc2-seed.example.com:8043"),
+            }));
+        }
+
+        [Test]
+        public void AlternatorDynamoDBClientBuilderRejectsInitialSeedsThatAreNotHostsTest()
+        {
+            var uriException = Assert.Throws<ArgumentException>(() =>
+                AlternatorDynamoDBClient.builder()
+                    .withInitialSeeds("https://dc1-seed.example.com:8043"));
+            Assert.That(uriException!.Message, Does.Contain("DNS name or IP address"));
+
+            var hostPortException = Assert.Throws<ArgumentException>(() =>
+                AlternatorDynamoDBClient.builder()
+                    .WithInitialSeeds("dc1-seed.example.com:8043"));
+            Assert.That(hostPortException!.Message, Does.Contain("without scheme or port"));
+        }
+
+        [Test]
+        public void AlternatorDynamoDBClientBuilderRequiresSchemeAndPortForInitialSeedsTest()
+        {
+            var schemeException = Assert.Throws<InvalidOperationException>(() =>
+                AlternatorDynamoDBClient.builder()
+                    .withPort(8043)
+                    .withInitialSeeds("dc1-seed.example.com")
+                    .WithoutValidation()
+                    .WithDeferredStart()
+                    .build());
+            Assert.That(schemeException!.Message, Does.Contain("scheme must be set"));
+
+            var portException = Assert.Throws<InvalidOperationException>(() =>
+                AlternatorDynamoDBClient.builder()
+                    .withScheme("https")
+                    .withInitialSeeds("dc1-seed.example.com")
+                    .WithoutValidation()
+                    .WithDeferredStart()
+                    .build());
+            Assert.That(portException!.Message, Does.Contain("port must be set"));
+        }
+
+        [Test]
         public void AlternatorDynamoDBClientBuilderBuildsWrapperWithAlternatorApiTest()
         {
             using var wrapper = AlternatorDynamoDBClient.builder()
@@ -95,7 +155,7 @@ namespace ScyllaDB.Alternator
                     .WithDeferredStart()
                     .build());
 
-            Assert.That(exception!.Message, Does.Contain("endpointOverride must be set"));
+            Assert.That(exception!.Message, Does.Contain("endpointOverride or withInitialSeeds must be set"));
         }
 
         [Test]
