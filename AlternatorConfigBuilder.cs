@@ -31,7 +31,6 @@ namespace ScyllaDB.Alternator
         private long connectionTimeToLiveMs = AlternatorConfig.DefaultConnectionTimeToLiveMs;
         private long connectionAcquisitionTimeoutMs = AlternatorConfig.DefaultConnectionAcquisitionTimeoutMs;
         private long connectionTimeoutMs = AlternatorConfig.DefaultConnectionTimeoutMs;
-        private TlsSessionCacheConfig? tlsSessionCacheConfig;
         private TlsConfig? tlsConfig;
 
         public AlternatorConfigBuilder WithSeedNode(Uri? seedUri)
@@ -217,12 +216,6 @@ namespace ScyllaDB.Alternator
             return this;
         }
 
-        public AlternatorConfigBuilder WithTlsSessionCacheConfig(TlsSessionCacheConfig? tlsSessionCacheConfig)
-        {
-            this.tlsSessionCacheConfig = tlsSessionCacheConfig;
-            return this;
-        }
-
 #pragma warning disable SA1300, IDE1006
         public AlternatorConfigBuilder withSeedNode(Uri? seedUri)
         {
@@ -324,11 +317,6 @@ namespace ScyllaDB.Alternator
             return this.WithTlsConfig(tlsConfig);
         }
 
-        public AlternatorConfigBuilder withTlsSessionCacheConfig(TlsSessionCacheConfig? tlsSessionCacheConfig)
-        {
-            return this.WithTlsSessionCacheConfig(tlsSessionCacheConfig);
-        }
-
         public AlternatorConfigBuilder withActiveRefreshIntervalMs(long intervalMs)
         {
             return this.WithActiveRefreshIntervalMs(intervalMs);
@@ -426,7 +414,6 @@ namespace ScyllaDB.Alternator
                 this.connectionTimeToLiveMs,
                 this.connectionAcquisitionTimeoutMs,
                 this.connectionTimeoutMs,
-                this.tlsSessionCacheConfig,
                 effectiveTlsConfig);
         }
 
@@ -435,14 +422,6 @@ namespace ScyllaDB.Alternator
             if (this.tlsConfig != null)
             {
                 return this.tlsConfig;
-            }
-
-            if (this.tlsSessionCacheConfig != null)
-            {
-                return TlsConfig.Builder()
-                    .WithTrustAllCertificates(true)
-                    .WithSessionCacheConfig(this.tlsSessionCacheConfig)
-                    .Build();
             }
 
             return TlsConfig.TrustAll();

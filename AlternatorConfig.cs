@@ -89,7 +89,6 @@ namespace ScyllaDB.Alternator
             long connectionTimeToLiveMs,
             long connectionAcquisitionTimeoutMs,
             long connectionTimeoutMs,
-            TlsSessionCacheConfig? tlsSessionCacheConfig,
             TlsConfig tlsConfig)
         {
             this.SeedHosts = seedHosts.AsReadOnly();
@@ -110,7 +109,6 @@ namespace ScyllaDB.Alternator
             this.ConnectionTimeToLiveMs = connectionTimeToLiveMs;
             this.ConnectionAcquisitionTimeoutMs = connectionAcquisitionTimeoutMs;
             this.ConnectionTimeoutMs = connectionTimeoutMs;
-            this.TlsSessionCacheConfig = tlsSessionCacheConfig ?? TlsSessionCacheConfig.GetDefault();
             this.TlsConfig = tlsConfig;
         }
 
@@ -151,8 +149,6 @@ namespace ScyllaDB.Alternator
         public long ConnectionTimeoutMs { get; }
 
         public TlsConfig TlsConfig { get; }
-
-        public TlsSessionCacheConfig TlsSessionCacheConfig { get; }
 
         public IReadOnlySet<string> RequiredHeaders => this.GetRequiredHeaders();
 
@@ -238,11 +234,6 @@ namespace ScyllaDB.Alternator
         public bool isAuthenticationEnabled()
         {
             return this.AuthenticationEnabled;
-        }
-
-        public TlsSessionCacheConfig getTlsSessionCacheConfig()
-        {
-            return this.TlsSessionCacheConfig;
         }
 
         public TlsConfig getTlsConfig()

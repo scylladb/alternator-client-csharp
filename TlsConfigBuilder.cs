@@ -12,7 +12,6 @@ namespace ScyllaDB.Alternator
         private bool trustSystemCaCerts = true;
         private bool trustAllCertificates;
         private bool verifyHostname = true;
-        private TlsSessionCacheConfig sessionCacheConfig = TlsSessionCacheConfig.GetDefault();
 
         public TlsConfigBuilder WithCaCertPath(string? path)
         {
@@ -77,12 +76,6 @@ namespace ScyllaDB.Alternator
             return this;
         }
 
-        public TlsConfigBuilder WithSessionCacheConfig(TlsSessionCacheConfig? sessionCacheConfig)
-        {
-            this.sessionCacheConfig = sessionCacheConfig ?? TlsSessionCacheConfig.GetDefault();
-            return this;
-        }
-
         public TlsConfig Build()
         {
             if (!this.trustAllCertificates && !this.trustSystemCaCerts && this.customCaCertPaths.Count == 0)
@@ -97,8 +90,7 @@ namespace ScyllaDB.Alternator
                 this.clientPrivateKeyPath,
                 this.trustSystemCaCerts,
                 this.trustAllCertificates,
-                this.trustAllCertificates ? false : this.verifyHostname,
-                this.sessionCacheConfig);
+                this.trustAllCertificates ? false : this.verifyHostname);
         }
 
 #pragma warning disable SA1300, IDE1006
@@ -130,11 +122,6 @@ namespace ScyllaDB.Alternator
         public TlsConfigBuilder withVerifyHostname(bool verifyHostname)
         {
             return this.WithVerifyHostname(verifyHostname);
-        }
-
-        public TlsConfigBuilder withSessionCacheConfig(TlsSessionCacheConfig? sessionCacheConfig)
-        {
-            return this.WithSessionCacheConfig(sessionCacheConfig);
         }
 
         public TlsConfig build()

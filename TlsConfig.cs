@@ -12,8 +12,7 @@ namespace ScyllaDB.Alternator
             null,
             false,
             true,
-            false,
-            TlsSessionCacheConfig.GetDefault());
+            false);
 
         private static readonly TlsConfig SystemDefaultInstance = new TlsConfig(
             new List<string>(),
@@ -21,8 +20,7 @@ namespace ScyllaDB.Alternator
             null,
             true,
             false,
-            true,
-            TlsSessionCacheConfig.GetDefault());
+            true);
 
         internal TlsConfig(
             IReadOnlyList<string> customCaCertPaths,
@@ -30,8 +28,7 @@ namespace ScyllaDB.Alternator
             string? clientPrivateKeyPath,
             bool trustSystemCaCerts,
             bool trustAllCertificates,
-            bool verifyHostname,
-            TlsSessionCacheConfig sessionCacheConfig)
+            bool verifyHostname)
         {
             this.CustomCaCertPaths = new List<string>(customCaCertPaths ?? Array.Empty<string>()).AsReadOnly();
             this.ClientCertificatePath = clientCertificatePath;
@@ -39,7 +36,6 @@ namespace ScyllaDB.Alternator
             this.TrustSystemCaCerts = trustSystemCaCerts;
             this.TrustAllCertificates = trustAllCertificates;
             this.VerifyHostname = verifyHostname;
-            this.SessionCacheConfig = sessionCacheConfig ?? TlsSessionCacheConfig.GetDefault();
         }
 
         public IReadOnlyList<string> CustomCaCertPaths { get; }
@@ -55,8 +51,6 @@ namespace ScyllaDB.Alternator
         public bool TrustAllCertificates { get; }
 
         public bool VerifyHostname { get; }
-
-        public TlsSessionCacheConfig SessionCacheConfig { get; }
 
         public static TlsConfig TrustAll()
         {
@@ -124,10 +118,6 @@ namespace ScyllaDB.Alternator
             return this.VerifyHostname;
         }
 
-        public TlsSessionCacheConfig getSessionCacheConfig()
-        {
-            return this.SessionCacheConfig;
-        }
 #pragma warning restore SA1300, IDE1006
 
         public override string ToString()
@@ -147,8 +137,6 @@ namespace ScyllaDB.Alternator
                 + this.TrustAllCertificates.ToString().ToLowerInvariant()
                 + ", verifyHostname="
                 + this.VerifyHostname.ToString().ToLowerInvariant()
-                + ", sessionCacheConfig="
-                + this.SessionCacheConfig
                 + "}";
         }
 
@@ -160,8 +148,7 @@ namespace ScyllaDB.Alternator
                 && this.VerifyHostname == other.VerifyHostname
                 && this.CustomCaCertPaths.SequenceEqual(other.CustomCaCertPaths)
                 && string.Equals(this.ClientCertificatePath, other.ClientCertificatePath, StringComparison.Ordinal)
-                && string.Equals(this.ClientPrivateKeyPath, other.ClientPrivateKeyPath, StringComparison.Ordinal)
-                && Equals(this.SessionCacheConfig, other.SessionCacheConfig);
+                && string.Equals(this.ClientPrivateKeyPath, other.ClientPrivateKeyPath, StringComparison.Ordinal);
         }
 
         public override int GetHashCode()
@@ -177,7 +164,6 @@ namespace ScyllaDB.Alternator
             hash.Add(this.TrustSystemCaCerts);
             hash.Add(this.TrustAllCertificates);
             hash.Add(this.VerifyHostname);
-            hash.Add(this.SessionCacheConfig);
             return hash.ToHashCode();
         }
     }

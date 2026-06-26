@@ -64,31 +64,12 @@ namespace ScyllaDB.Alternator
         }
 
         [Test]
-        public void TlsConfigAndSessionCacheSupportJavaStyleBuildersTest()
+        public void TlsConfigSupportsJavaStyleBuildersTest()
         {
-            var sessionCache = TlsSessionCacheConfig.builder()
-                .withEnabled(true)
-                .withSessionCacheSize(50)
-                .withSessionTimeoutSeconds(1800)
-                .build();
-            var sameSessionCache = TlsSessionCacheConfig.builder()
-                .withEnabled(true)
-                .withSessionCacheSize(50)
-                .withSessionTimeoutSeconds(1800)
-                .build();
-
-            Assert.That(sessionCache.isEnabled(), Is.True);
-            Assert.That(sessionCache.getSessionCacheSize(), Is.EqualTo(50));
-            Assert.That(sessionCache.getSessionTimeoutSeconds(), Is.EqualTo(1800));
-            Assert.That(sessionCache, Is.EqualTo(sameSessionCache));
-            Assert.That(TlsSessionCacheConfig.getDefault().isEnabled(), Is.True);
-            Assert.That(TlsSessionCacheConfig.disabled().isEnabled(), Is.False);
-
             var tls = TlsConfig.builder()
                 .withCaCertPath("/tmp/ca.pem")
                 .withClientCertificate("/tmp/client.crt", "/tmp/client.key")
                 .withTrustSystemCaCerts(false)
-                .withSessionCacheConfig(sessionCache)
                 .build();
 
             Assert.That(tls.getCustomCaCertPaths(), Is.EqualTo(new[] { "/tmp/ca.pem" }));
@@ -96,7 +77,6 @@ namespace ScyllaDB.Alternator
             Assert.That(tls.isTrustSystemCaCerts(), Is.False);
             Assert.That(tls.isTrustAllCertificates(), Is.False);
             Assert.That(tls.isVerifyHostname(), Is.True);
-            Assert.That(tls.getSessionCacheConfig(), Is.SameAs(sessionCache));
             Assert.That(TlsConfig.trustAll().isTrustAllCertificates(), Is.True);
             Assert.That(TlsConfig.systemDefault().isTrustSystemCaCerts(), Is.True);
         }
