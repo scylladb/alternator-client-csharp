@@ -607,7 +607,14 @@ namespace ScyllaDB.Alternator
 
         private Uri HostToUri(string host)
         {
-            return new Uri($"{this.alternatorScheme}://{host}:{this.alternatorPort}");
+            try
+            {
+                return new UriBuilder(this.alternatorScheme, host, this.alternatorPort).Uri;
+            }
+            catch (ArgumentException e)
+            {
+                throw new UriFormatException("Invalid host URI", e);
+            }
         }
 
         private int GetRefreshInterval()
@@ -681,7 +688,7 @@ namespace ScyllaDB.Alternator
         private List<Uri> GetNodes(Uri uri)
         {
             using var request = new HttpRequestMessage(HttpMethod.Get, uri);
-            request.Headers.Host = $"{uri.Host}:{uri.Port}";
+            request.Headers.Host = uri.Authority;
             request.Headers.Connection.Add("keep-alive");
             using var response = this.pollingHttpClient.SendAsync(request).Result;
             if (!response.IsSuccessStatusCode)

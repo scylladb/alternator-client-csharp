@@ -91,6 +91,25 @@ namespace ScyllaDB.Alternator
         }
 
         [Test]
+        public void AlternatorDynamoDBClientBuilderSupportsIpv6InitialSeedsTest()
+        {
+            using var wrapper = AlternatorDynamoDBClient.builder()
+                .withScheme("http")
+                .withPort(8080)
+                .withInitialSeeds("::1")
+                .withRoutingScope(ClusterScope.create())
+                .WithoutValidation()
+                .WithDeferredStart()
+                .buildWithAlternatorAPI();
+
+            Assert.That(wrapper.Config.getSeedHosts(), Is.EqualTo(new[] { "::1" }));
+            Assert.That(wrapper.getLiveNodes(), Is.EqualTo(new[]
+            {
+                new Uri("http://[::1]:8080"),
+            }));
+        }
+
+        [Test]
         public void AlternatorDynamoDBClientBuilderRejectsInitialSeedsThatAreNotHostsTest()
         {
             var uriException = Assert.Throws<ArgumentException>(() =>
