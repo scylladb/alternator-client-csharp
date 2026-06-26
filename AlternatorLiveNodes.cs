@@ -267,24 +267,26 @@ namespace ScyllaDB.Alternator
 
         public void CheckIfRackAndDatacenterSetCorrectly()
         {
-            var query = this.config.RoutingScope.LocalNodesQuery;
-            if (string.IsNullOrEmpty(query))
+            var scope = this.config.RoutingScope;
+            if (string.IsNullOrEmpty(scope.LocalNodesQuery))
             {
                 return;
             }
 
+            List<Uri> nodes;
             try
             {
-                var nodes = this.GetNodes(this.NextAsUri("/localnodes", query));
-                if (nodes.Count == 0)
-                {
-                    throw new ValidationError(
-                        $"node returned empty list for {this.config.RoutingScope.Description}, routing scope may be set incorrectly");
-                }
+                nodes = this.GetNodesForScope(scope);
             }
-            catch (IOException e)
+            catch (Exception e)
             {
                 throw new FailedToCheck("failed to read list of nodes from the node", e);
+            }
+
+            if (nodes.Count == 0)
+            {
+                throw new ValidationError(
+                    $"node returned empty list for {scope.Description}, routing scope may be set incorrectly");
             }
         }
 
@@ -641,11 +643,9 @@ namespace ScyllaDB.Alternator
             Exception? lastException = null;
             while (scope != null)
             {
-                var query = scope.LocalNodesQuery;
-                var uri = this.NextAsUri("/localnodes", string.IsNullOrEmpty(query) ? null : query);
                 try
                 {
-                    var nodes = this.GetNodes(uri);
+                    var nodes = this.GetNodesForScope(scope);
                     if (nodes.Count != 0)
                     {
                         var mergedNodes = this.MergeWithInitialNodes(nodes);
@@ -656,7 +656,7 @@ namespace ScyllaDB.Alternator
                 }
                 catch (Exception e)
                 {
-                    Logger.Warn(e, $"Failed to contact node {uri} for {scope.Description}");
+                    Logger.Warn(e, $"Failed to discover nodes for {scope.Description}");
                     lastException = e;
                 }
 
@@ -676,6 +676,57 @@ namespace ScyllaDB.Alternator
             }
 
             Logger.Warn("No nodes found in any routing scope, keeping existing node list");
+        }
+
+        private List<Uri> GetNodesForScope(RoutingScope scope)
+        {
+            var query = scope.LocalNodesQuery;
+            var requestQuery = string.IsNullOrEmpty(query) ? null : query;
+            Exception? lastException = null;
+            var nodes = new List<Uri>();
+            var seen = new HashSet<Uri>();
+            foreach (var seedNode in this.initialNodes)
+            {
+                var uri = BuildUri(seedNode, "/localnodes", requestQuery);
+                try
+                {
+                    var seedNodes = this.GetNodes(uri);
+                    if (seedNodes.Count == 0)
+                    {
+                        continue;
+                    }
+
+                    if (scope is not ClusterScope)
+                    {
+                        return seedNodes;
+                    }
+
+                    foreach (var node in seedNodes)
+                    {
+                        if (seen.Add(node))
+                        {
+                            nodes.Add(node);
+                        }
+                    }
+                }
+                catch (Exception e)
+                {
+                    Logger.Warn(e, $"Failed to contact seed node {seedNode} for {scope.Description}");
+                    lastException = e;
+                }
+            }
+
+            if (nodes.Count != 0)
+            {
+                return nodes;
+            }
+
+            if (lastException != null)
+            {
+                throw lastException;
+            }
+
+            return new List<Uri>();
         }
 
         private List<Uri> GetNodes(Uri uri)

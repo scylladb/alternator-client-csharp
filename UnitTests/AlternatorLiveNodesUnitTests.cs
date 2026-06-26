@@ -130,6 +130,123 @@ namespace ScyllaDB.Alternator
         }
 
         [Test]
+        public void ClusterScopePollsAllSeedNodesAndMergesResultsTest()
+        {
+            var handler = new DiscoveryHttpMessageHandler(new Dictionary<string, string>
+            {
+                ["dc1-node1.example.com"] = "[\"dc1-node1.example.com\",\"dc1-node2.example.com\"]",
+                ["dc2-node1.example.com"] = "[\"dc2-node1.example.com\",\"dc2-node2.example.com\"]",
+            });
+            using var pollingHttpClient = new HttpClient(handler);
+            var config = AlternatorConfig.builder()
+                .withSeedHosts(new[] { "dc1-node1.example.com", "dc2-node1.example.com" })
+                .withScheme("http")
+                .withPort(8000)
+                .withRoutingScope(ClusterScope.create())
+                .build();
+            var liveNodes = new AlternatorLiveNodes(config, pollingHttpClient);
+
+            InvokeUpdateLiveNodes(liveNodes);
+
+            Assert.That(
+                liveNodes.getLiveNodes().Select(node => node.Host),
+                Is.EqualTo(new[]
+                {
+                    "dc1-node1.example.com",
+                    "dc1-node2.example.com",
+                    "dc2-node1.example.com",
+                    "dc2-node2.example.com",
+                }));
+            Assert.That(
+                handler.RequestedUris.Select(uri => uri.Host),
+                Is.EqualTo(new[] { "dc1-node1.example.com", "dc2-node1.example.com" }));
+            Assert.That(handler.RequestedUris.Select(uri => uri.AbsolutePath), Is.All.EqualTo("/localnodes"));
+            Assert.That(handler.RequestedUris.Select(uri => uri.Query), Is.All.Empty);
+        }
+
+        [Test]
+        public void ClusterScopeKeepsSuccessfulDiscoveryWhenAnotherSeedFailsTest()
+        {
+            var handler = new DiscoveryHttpMessageHandler(
+                new Dictionary<string, string>
+                {
+                    ["dc1-node1.example.com"] = "[\"dc1-node1.example.com\"]",
+                },
+                new HashSet<string> { "dc2-node1.example.com" });
+            using var pollingHttpClient = new HttpClient(handler);
+            var config = AlternatorConfig.builder()
+                .withSeedHosts(new[] { "dc1-node1.example.com", "dc2-node1.example.com" })
+                .withScheme("http")
+                .withPort(8000)
+                .withRoutingScope(ClusterScope.create())
+                .build();
+            var liveNodes = new AlternatorLiveNodes(config, pollingHttpClient);
+
+            InvokeUpdateLiveNodes(liveNodes);
+
+            Assert.That(
+                liveNodes.getLiveNodes().Select(node => node.Host),
+                Is.EqualTo(new[] { "dc1-node1.example.com", "dc2-node1.example.com" }));
+            Assert.That(
+                handler.RequestedUris.Select(uri => uri.Host),
+                Is.EqualTo(new[] { "dc1-node1.example.com", "dc2-node1.example.com" }));
+        }
+
+        [Test]
+        public void RackScopeRetriesNextSeedWhenFirstSeedReportsNoNodesTest()
+        {
+            var handler = new DiscoveryHttpMessageHandler(new Dictionary<string, string>
+            {
+                ["dc2-node1.example.com"] = "[]",
+                ["dc1-node1.example.com"] = "[\"dc1-rack1-node.example.com\"]",
+            });
+            using var pollingHttpClient = new HttpClient(handler);
+            var config = AlternatorConfig.builder()
+                .withSeedHosts(new[] { "dc2-node1.example.com", "dc1-node1.example.com" })
+                .withScheme("http")
+                .withPort(8000)
+                .withRoutingScope(RackScope.of("dc1", "rack1", DatacenterScope.of("dc1", ClusterScope.create())))
+                .build();
+            var liveNodes = new AlternatorLiveNodes(config, pollingHttpClient);
+
+            InvokeUpdateLiveNodes(liveNodes);
+
+            Assert.That(
+                liveNodes.getLiveNodes().Select(node => node.Host),
+                Is.EqualTo(new[] { "dc1-rack1-node.example.com", "dc2-node1.example.com", "dc1-node1.example.com" }));
+            Assert.That(
+                handler.RequestedUris.Select(uri => uri.Host),
+                Is.EqualTo(new[] { "dc2-node1.example.com", "dc1-node1.example.com" }));
+            Assert.That(handler.RequestedUris.Select(uri => uri.AbsolutePath), Is.All.EqualTo("/localnodes"));
+            Assert.That(handler.RequestedUris.Select(uri => uri.Query), Is.All.EqualTo("?dc=dc1&rack=rack1"));
+        }
+
+        [Test]
+        public void CheckIfRackAndDatacenterSetCorrectlyRetriesNextSeedTest()
+        {
+            var handler = new DiscoveryHttpMessageHandler(new Dictionary<string, string>
+            {
+                ["dc2-node1.example.com"] = "[]",
+                ["dc1-node1.example.com"] = "[\"dc1-rack1-node.example.com\"]",
+            });
+            using var pollingHttpClient = new HttpClient(handler);
+            var config = AlternatorConfig.builder()
+                .withSeedHosts(new[] { "dc2-node1.example.com", "dc1-node1.example.com" })
+                .withScheme("http")
+                .withPort(8000)
+                .withRoutingScope(RackScope.of("dc1", "rack1", DatacenterScope.of("dc1", ClusterScope.create())))
+                .build();
+            var liveNodes = new AlternatorLiveNodes(config, pollingHttpClient);
+
+            liveNodes.checkIfRackAndDatacenterSetCorrectly();
+
+            Assert.That(
+                handler.RequestedUris.Select(uri => uri.Host),
+                Is.EqualTo(new[] { "dc2-node1.example.com", "dc1-node1.example.com" }));
+            Assert.That(handler.RequestedUris.Select(uri => uri.Query), Is.All.EqualTo("?dc=dc1&rack=rack1"));
+        }
+
+        [Test]
         public void PollingRequestIncludesJavaStyleKeepAliveAndHostHeadersTest()
         {
             using var server = new LocalNodesServer(1, _ => "[\"127.0.0.2\"]");
@@ -358,6 +475,42 @@ namespace ScyllaDB.Alternator
                 }
 
                 base.Dispose(disposing);
+            }
+        }
+
+        private sealed class DiscoveryHttpMessageHandler : HttpMessageHandler
+        {
+            private readonly IReadOnlyDictionary<string, string> responsesByHost;
+            private readonly ISet<string> failingHosts;
+
+            internal DiscoveryHttpMessageHandler(
+                IReadOnlyDictionary<string, string> responsesByHost,
+                ISet<string>? failingHosts = null)
+            {
+                this.responsesByHost = responsesByHost;
+                this.failingHosts = failingHosts ?? new HashSet<string>();
+            }
+
+            internal List<Uri> RequestedUris { get; } = new List<Uri>();
+
+            protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+            {
+                var uri = request.RequestUri ?? throw new InvalidOperationException("Request URI was not set.");
+                this.RequestedUris.Add(uri);
+                if (this.failingHosts.Contains(uri.Host))
+                {
+                    throw new HttpRequestException("simulated discovery failure for " + uri.Host);
+                }
+
+                if (!this.responsesByHost.TryGetValue(uri.Host, out var responseBody))
+                {
+                    throw new InvalidOperationException("Unexpected discovery host: " + uri.Host);
+                }
+
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(responseBody, Encoding.UTF8, "application/json"),
+                });
             }
         }
 
