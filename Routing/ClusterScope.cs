@@ -4,6 +4,15 @@
 
 namespace ScyllaDB.Alternator.Routing
 {
+    /// <summary>
+    /// Routes requests across the unfiltered node list returned by the bare /localnodes endpoint.
+    /// </summary>
+    /// <remarks>
+    /// Alternator usually returns only the nodes visible from the node that handled /localnodes.
+    /// In multi-datacenter deployments, callers must provide reachable seed hosts from every
+    /// datacenter; otherwise cluster scope cannot discover or route through the missing
+    /// datacenters.
+    /// </remarks>
     public sealed class ClusterScope : RoutingScope
     {
         private static readonly ClusterScope Instance = new ClusterScope();
