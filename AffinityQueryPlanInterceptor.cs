@@ -130,13 +130,19 @@ namespace ScyllaDB.Alternator
                 return null;
             }
 
+            var votes = new Dictionary<Uri, int>();
+            var discoveryTriggered = new HashSet<string>(StringComparer.Ordinal);
             foreach (var target in KeyAffinityRequestClassifier.ExtractBatchWriteRoutingTargets(request))
             {
                 var partitionKeyName = resolver.GetPartitionKeyName(target.TableName);
                 if (partitionKeyName == null)
                 {
-                    resolver.TriggerDiscovery(target.TableName);
-                    return null;
+                    if (discoveryTriggered.Add(target.TableName))
+                    {
+                        resolver.TriggerDiscovery(target.TableName);
+                    }
+
+                    continue;
                 }
 
                 var partitionKey = target.PartitionKeyValue(partitionKeyName);
@@ -147,14 +153,43 @@ namespace ScyllaDB.Alternator
 
                 try
                 {
-                    return this.LiveNodes.CreateQueryPlan(AttributeValueHasher.Hash(partitionKey));
+                    var preferredNode = LazyQueryPlan.PreferredNodeForHash(
+                        this.LiveNodes,
+                        AttributeValueHasher.Hash(partitionKey));
+                    if (preferredNode != null)
+                    {
+                        votes[preferredNode] = votes.TryGetValue(preferredNode, out var count) ? count + 1 : 1;
+                    }
                 }
                 catch (ArgumentException)
                 {
                 }
             }
 
-            return null;
+            var selectedNode = this.SelectBatchWritePreferredNode(votes);
+            return selectedNode == null ? null : this.LiveNodes.CreateQueryPlan(new[] { selectedNode });
+        }
+
+        private Uri? SelectBatchWritePreferredNode(IReadOnlyDictionary<Uri, int> votes)
+        {
+            Uri? preferredNode = null;
+            var preferredVotes = 0;
+            var tied = false;
+            foreach (var vote in votes)
+            {
+                if (vote.Value > preferredVotes)
+                {
+                    preferredNode = vote.Key;
+                    preferredVotes = vote.Value;
+                    tied = false;
+                }
+                else if (vote.Value == preferredVotes)
+                {
+                    tied = true;
+                }
+            }
+
+            return preferredNode == null || tied ? null : preferredNode;
         }
     }
 }

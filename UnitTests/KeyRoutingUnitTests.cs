@@ -51,27 +51,38 @@ namespace ScyllaDB.Alternator
         }
 
         [Test]
-        public void BatchWriteItemKeyRouteAffinityMatchesCrossLanguageVectorsTest()
+        public void BatchWriteItemRoutingTargetsIncludeOnlyValidPutAndDeleteCandidatesTest()
         {
-            foreach (var vector in BatchWriteVectors())
-            {
-                var targets = KeyAffinityRequestClassifier.ExtractBatchWriteRoutingTargets(vector.Request);
-                Assert.That(targets, Is.Not.Empty, vector.Name);
-                Assert.That(KeyAffinityRequestClassifier.ShouldApply(KeyRouteAffinity.AnyWrite, vector.Request), Is.True, vector.Name);
+            var request = BatchWrite(
+                Table(
+                    "orders",
+                    Put(Attributes("pk", StringAttribute("put-key"), "data", StringAttribute("value"))),
+                    Delete(Attributes("pk", StringAttribute("delete-key"))),
+                    Put(Attributes("data", StringAttribute("missing-pk"))),
+                    new WriteRequest(),
+                    new WriteRequest { PutRequest = new PutRequest() },
+                    new WriteRequest { DeleteRequest = new DeleteRequest() },
+                    new WriteRequest
+                    {
+                        PutRequest = new PutRequest { Item = Attributes("pk", StringAttribute("invalid-put")) },
+                        DeleteRequest = new DeleteRequest { Key = Attributes("pk", StringAttribute("invalid-delete")) },
+                    }));
 
-                var target = targets[0];
-                Assert.That(target.TableName, Is.EqualTo(vector.TableName), vector.Name);
-                Assert.That(target.Operation, Is.EqualTo(vector.Operation), vector.Name);
-                Assert.That(target.CanonicalAttributes, Is.EqualTo(vector.CanonicalAttributes), vector.Name);
+            var targets = KeyAffinityRequestClassifier.ExtractBatchWriteRoutingTargets(request);
 
-                var partitionKeyValue = target.PartitionKeyValue(vector.PkInfo[target.TableName]);
-                Assert.That(AttributeLabel(partitionKeyValue), Is.EqualTo(vector.PartitionKeyLabel), vector.Name);
-
-                var hash = BatchWriteHash(vector.Request, vector.PkInfo);
-                Assert.That(hash, Is.EqualTo(vector.HashSigned), vector.Name);
-                Assert.That(((ulong)hash).ToString(), Is.EqualTo(vector.HashUnsigned), vector.Name);
-                Assert.That(NodeSequence(hash, 6), Is.EqualTo(vector.FirstSixNodes), vector.Name);
-            }
+            Assert.That(targets, Has.Count.EqualTo(3));
+            Assert.That(KeyAffinityRequestClassifier.ShouldApply(KeyRouteAffinity.AnyWrite, request), Is.True);
+            Assert.That(KeyAffinityRequestClassifier.ShouldApply(KeyRouteAffinity.Rmw, request), Is.False);
+            AssertBatchWriteCandidate(targets, "orders", "PutRequest", "pk", "put-key");
+            AssertBatchWriteCandidate(targets, "orders", "DeleteRequest", "pk", "delete-key");
+            Assert.That(
+                targets.Any(target =>
+                    target.TableName == "orders"
+                    && target.Operation == "PutRequest"
+                    && target.PartitionKeyValue("pk") == null),
+                Is.True);
+            Assert.Throws<NotSupportedException>(() =>
+                ((IList<KeyAffinityRequestClassifier.BatchWriteRoutingTarget>)targets).Clear());
         }
 
         [Test]
@@ -241,7 +252,7 @@ namespace ScyllaDB.Alternator
         }
 
         [Test]
-        public void BatchWriteItemRoutingTargetsUseJavaDeterministicOrderTest()
+        public void BatchWriteItemRoutingTargetsPreserveValidWriteOrderTest()
         {
             var request = BatchWrite(
                 Table(
@@ -255,13 +266,13 @@ namespace ScyllaDB.Alternator
 
             Assert.That(targets, Has.Count.EqualTo(2));
             Assert.That(targets[0].tableName(), Is.EqualTo("orders"));
-            Assert.That(targets[0].operation(), Is.EqualTo("PutRequest"));
+            Assert.That(targets[0].operation(), Is.EqualTo("DeleteRequest"));
             Assert.That(firstPartitionKey, Is.Not.Null);
-            Assert.That(firstPartitionKey!.S, Is.EqualTo("put-key"));
+            Assert.That(firstPartitionKey!.S, Is.EqualTo("delete-key"));
             Assert.That(targets[1].tableName(), Is.EqualTo("orders"));
-            Assert.That(targets[1].operation(), Is.EqualTo("DeleteRequest"));
+            Assert.That(targets[1].operation(), Is.EqualTo("PutRequest"));
             Assert.That(secondPartitionKey, Is.Not.Null);
-            Assert.That(secondPartitionKey!.S, Is.EqualTo("delete-key"));
+            Assert.That(secondPartitionKey!.S, Is.EqualTo("put-key"));
             Assert.Throws<NotSupportedException>(() =>
                 ((IList<KeyAffinityRequestClassifier.BatchWriteRoutingTarget>)targets).Clear());
         }
@@ -451,101 +462,142 @@ namespace ScyllaDB.Alternator
         }
 
         [Test]
-        public void QueryPlanPipelineHandlerUsesBatchWriteAffinityPlanTest()
+        public void QueryPlanPipelineHandlerBatchWriteVotingSelectsStrictMajorityPreferredNodeTest()
         {
-            var helper = CreateHelperForNodes("node1", "node2", "node3", "node4", "node5", "node6", "node7", "node8", "node9", "node10");
-            var affinity = KeyRouteAffinityConfig.builder()
-                .withType(KeyRouteAffinity.ANY_WRITE)
-                .withPkInfo("orders", "pk")
-                .build();
+            var helper = CreateBatchWriteAffinityHelper();
+            var sortedNodes = LazyQueryPlan.sortedAffinityNodes(helper.getAlternatorLiveNodes());
+            var target = sortedNodes[0];
+            var other = sortedNodes[1];
+            var targetKeys = FindPartitionKeyValuesForNode(helper, target, 2);
+            var otherKey = FindPartitionKeyValuesForNode(helper, other, 1)[0];
+            var affinity = BatchWriteAffinityConfig(PkInfo("audit", "id", "orders", "id"));
             using var resolver = new PartitionKeyResolver(affinity.PkInfoPerTable.ToDictionary(item => item.Key, item => item.Value));
             var handler = CreateQueryPlanPipelineHandler(helper, affinity, resolver);
-            var request = BatchWrite(
-                Table("orders", Put(Attributes("pk", StringAttribute("order456"))), Put(Attributes("pk", StringAttribute("order123")))));
-            var expectedPlan = InvokeCreateQueryPlan(helper, BatchWriteHash(request, affinity.PkInfoPerTable));
-
-            var actualPlan = InvokeGetOrCreateQueryPlan(handler, request, new Dictionary<string, object>());
-
-            Assert.That(DrainQueryPlanUris(actualPlan, 10), Is.EqualTo(DrainQueryPlanUris(expectedPlan, 10)));
-        }
-
-        [Test]
-        public void QueryPlanPipelineHandlerBatchWriteUsesFirstDeterministicCandidateTest()
-        {
-            var helper = CreateHelperForNodes("node1", "node2", "node3", "node4", "node5");
-            var affinity = KeyRouteAffinityConfig.builder()
-                .withType(KeyRouteAffinity.ANY_WRITE)
-                .withPkInfo("orders", "pk")
-                .build();
-            using var resolver = new PartitionKeyResolver(affinity.PkInfoPerTable.ToDictionary(item => item.Key, item => item.Value));
-            var handler = CreateQueryPlanPipelineHandler(helper, affinity, resolver);
-            var majorityPk = "test-pk-value-123";
-            var otherPk = FindPkValueWithDifferentRoute(helper, "other-route-", majorityPk);
             var request = BatchWrite(
                 Table(
                     "orders",
-                    Put(Attributes("pk", StringAttribute(otherPk))),
-                    Put(Attributes("pk", StringAttribute(majorityPk))),
-                    Delete(Attributes("pk", StringAttribute(majorityPk)))));
-            var expectedRoute = DrainQueryPlanUris(InvokeCreateQueryPlan(helper, BatchWriteHash(request, affinity.PkInfoPerTable)), 1)[0];
+                    Put(ItemWithId(targetKeys[0], "orders-payload")),
+                    Delete(KeyWithId(otherKey))),
+                Table("audit", Put(ItemWithId(targetKeys[1], "audit-payload"))));
 
             var actualPlan = InvokeGetOrCreateQueryPlan(handler, request, new Dictionary<string, object>());
+            var actualHosts = DrainQueryPlanUris(actualPlan, sortedNodes.Count).Select(uri => uri.Host).ToList();
+            var expectedHosts = new[] { target.Host }
+                .Concat(sortedNodes.Where(node => !node.Equals(target)).Select(node => node.Host))
+                .ToList();
 
-            Assert.That(DrainQueryPlanUris(actualPlan, 1)[0], Is.EqualTo(expectedRoute));
+            Assert.That(actualHosts, Is.EqualTo(expectedHosts));
         }
 
         [Test]
-        public void QueryPlanPipelineHandlerBatchWriteCandidatesUseJavaDeterministicOrderTest()
+        public void QueryPlanPipelineHandlerBatchWriteVotingIsStableForEquivalentBatchesTest()
         {
-            var helper = CreateHelperForNodes("node1", "node2", "node3", "node4", "node5");
-            var affinity = KeyRouteAffinityConfig.builder()
-                .withType(KeyRouteAffinity.ANY_WRITE)
-                .withPkInfo("orders", "pk")
-                .build();
+            var helper = CreateBatchWriteAffinityHelper();
+            var sortedNodes = LazyQueryPlan.sortedAffinityNodes(helper.getAlternatorLiveNodes());
+            var target = sortedNodes[0];
+            var other = sortedNodes[1];
+            var targetKeys = FindPartitionKeyValuesForNode(helper, target, 2);
+            var otherKey = FindPartitionKeyValuesForNode(helper, other, 1)[0];
+            var affinity = BatchWriteAffinityConfig(PkInfo("audit", "id", "orders", "id"));
+            var first = BatchWrite(
+                Table(
+                    "orders",
+                    Put(ItemWithId(targetKeys[0], "payload-a")),
+                    Delete(KeyWithId(otherKey))),
+                Table("audit", Put(ItemWithId(targetKeys[1], "payload-b"))));
+            var second = BatchWrite(
+                Table("audit", Put(ItemWithId(targetKeys[1], "changed-audit-payload"))),
+                Table(
+                    "orders",
+                    Delete(KeyWithId(otherKey)),
+                    Put(ItemWithId(targetKeys[0], "changed-orders-payload"))));
+
+            var firstNode = FirstBatchWriteRoute(helper, affinity, first);
+            var secondNode = FirstBatchWriteRoute(helper, affinity, second);
+
+            Assert.That(firstNode, Is.EqualTo(target));
+            Assert.That(secondNode, Is.EqualTo(firstNode));
+        }
+
+        [Test]
+        public void QueryPlanPipelineHandlerBatchWriteVotingFallsBackOnTieTest()
+        {
+            var helper = CreateBatchWriteAffinityHelper();
+            var sortedNodes = LazyQueryPlan.sortedAffinityNodes(helper.getAlternatorLiveNodes());
+            var leftKey = FindPartitionKeyValuesForNode(helper, sortedNodes[0], 1)[0];
+            var rightKey = FindPartitionKeyValuesForNode(helper, sortedNodes[1], 1)[0];
+            var affinity = BatchWriteAffinityConfig(PkInfo("orders", "id"));
             using var resolver = new PartitionKeyResolver(affinity.PkInfoPerTable.ToDictionary(item => item.Key, item => item.Value));
             var handler = CreateQueryPlanPipelineHandler(helper, affinity, resolver);
-            var firstPk = "test-pk-value-123";
-            var secondPk = FindPkValueWithDifferentRoute(helper, "tie-route-", firstPk);
             var request = BatchWrite(
                 Table(
                     "orders",
-                    Put(Attributes("pk", StringAttribute(firstPk))),
-                    Put(Attributes("pk", StringAttribute(secondPk)))));
-            var expectedRoute = DrainQueryPlanUris(InvokeCreateQueryPlan(helper, BatchWriteHash(request, affinity.PkInfoPerTable)), 1)[0];
+                    Put(ItemWithId(leftKey, "left")),
+                    Delete(KeyWithId(rightKey))));
 
-            var actualPlan = InvokeGetOrCreateQueryPlan(handler, request, new Dictionary<string, object>());
-
-            Assert.That(DrainQueryPlanUris(actualPlan, 1)[0], Is.EqualTo(expectedRoute));
+            Assert.That(InvokeTryCreateBatchWriteAffinityQueryPlan(handler, request), Is.Null);
         }
 
         [Test]
-        public async Task QueryPlanPipelineHandlerBatchWriteStopsAtMissingMetadataAndFallsBackToBasicPlanTest()
+        public async Task QueryPlanPipelineHandlerBatchWriteVotingSkipsUnusableCandidatesTest()
         {
             var attempts = 0;
-            var helper = CreateHelperForNodes("node1", "node2", "node3", "node4", "node5");
-            var affinity = KeyRouteAffinityConfig.builder()
-                .withType(KeyRouteAffinity.ANY_WRITE)
-                .withPkInfo("orders", "pk")
-                .build();
+            var helper = CreateBatchWriteAffinityHelper();
+            var target = LazyQueryPlan.sortedAffinityNodes(helper.getAlternatorLiveNodes())[0];
+            var targetKey = FindPartitionKeyValuesForNode(helper, target, 1)[0];
+            var affinity = BatchWriteAffinityConfig(PkInfo("orders", "id"));
             using var resolver = CreatePartitionKeyResolver(
                 affinity.PkInfoPerTable.ToDictionary(item => item.Key, item => item.Value),
                 (tableName, cancellationToken) =>
                 {
                     attempts++;
-                    return Task.FromResult(CreateDescribeTableResponse("pk"));
+                    return Task.FromResult(CreateDescribeTableResponse("id"));
                 });
             var handler = CreateQueryPlanPipelineHandler(helper, affinity, resolver);
             var request = BatchWrite(
-                Table("aaa_unknown_table", Put(Attributes("pk", StringAttribute("unknown-pk")))),
-                Table("orders", Put(Attributes("pk", StringAttribute("test-pk-value-123")))));
+                Table("unknown", Put(ItemWithId("missing-metadata", "ignored"))),
+                Table(
+                    "orders",
+                    new WriteRequest(),
+                    new WriteRequest { PutRequest = new PutRequest() },
+                    new WriteRequest
+                    {
+                        PutRequest = new PutRequest { Item = KeyWithId("invalid") },
+                        DeleteRequest = new DeleteRequest { Key = KeyWithId("invalid") },
+                    },
+                    Put(Attributes("id", new AttributeValue { BOOL = true })),
+                    Delete(KeyWithId(targetKey))));
 
             var actualPlan = InvokeGetOrCreateQueryPlan(handler, request, new Dictionary<string, object>());
-            var hosts = DrainQueryPlanHosts(actualPlan, 5);
+            var firstNode = DrainQueryPlanUris(actualPlan, 1)[0];
 
-            Assert.That(hosts, Is.EquivalentTo(new[] { "node1", "node2", "node3", "node4", "node5" }));
-            await WaitUntilAsync(() => resolver.GetPartitionKeyName("aaa_unknown_table") == "pk");
+            Assert.That(firstNode, Is.EqualTo(target));
+            await WaitUntilAsync(() => resolver.GetPartitionKeyName("unknown") == "id");
             Assert.That(attempts, Is.EqualTo(1));
-            Assert.That(resolver.GetPartitionKeyName("aaa_unknown_table"), Is.EqualTo("pk"));
+            Assert.That(resolver.GetPartitionKeyName("unknown"), Is.EqualTo("id"));
+        }
+
+        [Test]
+        public void QueryPlanPipelineHandlerBatchWriteVotingSupportsPartitionKeyTypesTest()
+        {
+            var helper = CreateBatchWriteAffinityHelper();
+            var affinity = BatchWriteAffinityConfig(PkInfo("orders", "id"));
+            var cases = new Dictionary<string, AttributeValue>
+            {
+                ["string_partition_key"] = StringAttribute("string-key"),
+                ["number_partition_key"] = NumberAttribute("42"),
+                ["binary_partition_key"] = BinaryAttribute(0x00, 0xff),
+            };
+
+            foreach (var testCase in cases)
+            {
+                var request = BatchWrite(Table("orders", Put(Attributes("id", testCase.Value))));
+                var expectedNode = NodeForPartitionKeyValue(helper, testCase.Value);
+
+                var actualNode = FirstBatchWriteRoute(helper, affinity, request);
+
+                Assert.That(actualNode, Is.EqualTo(expectedNode), testCase.Key);
+            }
         }
 
         [Test]
@@ -707,79 +759,6 @@ namespace ScyllaDB.Alternator
             return nodes;
         }
 
-        private static List<BatchWriteVector> BatchWriteVectors()
-        {
-            return new List<BatchWriteVector>
-            {
-                new BatchWriteVector(
-                    "same_table_write_order",
-                    BatchWrite(
-                        Table("orders", Put(Attributes("pk", StringAttribute("order456"))), Put(Attributes("pk", StringAttribute("order123"))))),
-                    PkInfo("orders", "pk"),
-                    "orders",
-                    "PutRequest",
-                    "S:order123",
-                    "{\"pk\":{\"S\":\"order123\"}}",
-                    -2126891002421145093L,
-                    "16319853071288406523",
-                    new List<string> { "node8", "node10", "node9", "node7", "node6", "node4" }),
-                new BatchWriteVector(
-                    "multi_table_order",
-                    BatchWrite(
-                        Table("sessions", Delete(Attributes("pk", StringAttribute("session123")))),
-                        Table(
-                            "orders",
-                            Put(Attributes("data", StringAttribute("value"), "pk", StringAttribute("order456"))),
-                            Put(Attributes("pk", StringAttribute("order123"), "data", StringAttribute("value"))))),
-                    PkInfo("orders", "pk", "sessions", "pk"),
-                    "orders",
-                    "PutRequest",
-                    "S:order123",
-                    "{\"data\":{\"S\":\"value\"},\"pk\":{\"S\":\"order123\"}}",
-                    -2126891002421145093L,
-                    "16319853071288406523",
-                    new List<string> { "node8", "node10", "node9", "node7", "node6", "node4" }),
-                new BatchWriteVector(
-                    "delete_put_same_attributes",
-                    BatchWrite(
-                        Table("orders", Put(Attributes("pk", StringAttribute("same"))), Delete(Attributes("pk", StringAttribute("same"))))),
-                    PkInfo("orders", "pk"),
-                    "orders",
-                    "DeleteRequest",
-                    "S:same",
-                    "{\"pk\":{\"S\":\"same\"}}",
-                    -4879317772220196571L,
-                    "13567426301489355045",
-                    new List<string> { "node1", "node2", "node9", "node6", "node3", "node4" }),
-                new BatchWriteVector(
-                    "number_partition_key",
-                    BatchWrite(Table("accounts", Put(Attributes("pk", NumberAttribute("7"))), Put(Attributes("pk", NumberAttribute("42"))))),
-                    PkInfo("accounts", "pk"),
-                    "accounts",
-                    "PutRequest",
-                    "N:42",
-                    "{\"pk\":{\"N\":\"42\"}}",
-                    -5061732451827723051L,
-                    "13385011621881828565",
-                    new List<string> { "node2", "node6", "node1", "node9", "node10", "node4" }),
-                new BatchWriteVector(
-                    "binary_partition_key",
-                    BatchWrite(
-                        Table(
-                            "blobs",
-                            Put(Attributes("pk", BinaryAttribute(0x01, 0x02, 0x03))),
-                            Delete(Attributes("pk", BinaryAttribute(0x00, 0xff))))),
-                    PkInfo("blobs", "pk"),
-                    "blobs",
-                    "DeleteRequest",
-                    "B:00ff",
-                    "{\"pk\":{\"B\":{\"__bytes__\":\"00ff\"}}}",
-                    -4376945693382523102L,
-                    "14069798380327028514",
-                    new List<string> { "node6", "node10", "node4", "node1", "node5", "node8" }),
-            };
-        }
-
         private static BatchWriteItemRequest BatchWrite(params KeyValuePair<string, List<WriteRequest>>[] tables)
         {
             var requestItems = new Dictionary<string, List<WriteRequest>>();
@@ -791,48 +770,88 @@ namespace ScyllaDB.Alternator
             return new BatchWriteItemRequest { RequestItems = requestItems };
         }
 
-        private static long BatchWriteHash(BatchWriteItemRequest request, IReadOnlyDictionary<string, string> pkInfo)
+        private static KeyRouteAffinityConfig BatchWriteAffinityConfig(IDictionary<string, string> pkInfo)
         {
-            foreach (var target in KeyAffinityRequestClassifier.ExtractBatchWriteRoutingTargets(request))
-            {
-                var partitionKeyValue = target.PartitionKeyValue(pkInfo[target.TableName]);
-                if (partitionKeyValue == null)
-                {
-                    continue;
-                }
-
-                try
-                {
-                    return AttributeValueHasher.Hash(partitionKeyValue);
-                }
-                catch (ArgumentException)
-                {
-                }
-            }
-
-            throw new AssertionException("Batch write request does not have a usable partition key value.");
+            return KeyRouteAffinityConfig.builder()
+                .withType(KeyRouteAffinity.ANY_WRITE)
+                .withPkInfoMap(pkInfo)
+                .build();
         }
 
-        private static Uri FirstAffinityRouteForPk(Helper helper, string partitionKeyValue)
+        private static Helper CreateBatchWriteAffinityHelper()
         {
-            return LazyQueryPlan.preferredNodeForHash(
+            return CreateHelperForNodes("node2.example.com", "node10.example.com", "node1.example.com", "node3.example.com");
+        }
+
+        private static Uri FirstBatchWriteRoute(Helper helper, KeyRouteAffinityConfig affinity, BatchWriteItemRequest request)
+        {
+            using var resolver = new PartitionKeyResolver(affinity.PkInfoPerTable.ToDictionary(item => item.Key, item => item.Value));
+            var handler = CreateQueryPlanPipelineHandler(helper, affinity, resolver);
+            return DrainQueryPlanUris(InvokeGetOrCreateQueryPlan(handler, request, new Dictionary<string, object>()), 1)[0];
+        }
+
+        private static object? InvokeTryCreateBatchWriteAffinityQueryPlan(
+            QueryPlanPipelineHandler handler,
+            BatchWriteItemRequest request)
+        {
+            var method = typeof(AffinityQueryPlanInterceptor).GetMethod(
+                "TryCreateBatchWriteAffinityQueryPlan",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic,
+                null,
+                new[] { typeof(BatchWriteItemRequest) },
+                null);
+            Assert.That(method, Is.Not.Null);
+            return method!.Invoke(handler, new object[] { request });
+        }
+
+        private static Uri NodeForPartitionKeyValue(Helper helper, AttributeValue value)
+        {
+            var node = LazyQueryPlan.preferredNodeForHash(
                 helper.getAlternatorLiveNodes(),
-                AttributeValueHasher.hash(StringAttribute(partitionKeyValue))) !;
+                AttributeValueHasher.hash(value));
+            Assert.That(node, Is.Not.Null);
+            return node!;
         }
 
-        private static string FindPkValueWithDifferentRoute(Helper helper, string prefix, string otherPartitionKeyValue)
+        private static List<string> FindPartitionKeyValuesForNode(Helper helper, Uri target, int count)
         {
-            var otherRoute = FirstAffinityRouteForPk(helper, otherPartitionKeyValue);
-            for (var index = 0; index < 100; index++)
+            var keys = new List<string>();
+            for (var index = 0; index < 10000 && keys.Count < count; index++)
             {
-                var candidate = prefix + index;
-                if (!FirstAffinityRouteForPk(helper, candidate).Equals(otherRoute))
+                var candidate = $"{target.Host}-key-{index}";
+                if (NodeForPartitionKeyValue(helper, StringAttribute(candidate)).Equals(target))
                 {
-                    return candidate;
+                    keys.Add(candidate);
                 }
             }
 
-            throw new AssertionException("Could not find test partition key with a different affinity route.");
+            Assert.That(keys, Has.Count.EqualTo(count));
+            return keys;
+        }
+
+        private static Dictionary<string, AttributeValue> ItemWithId(string id, string payload)
+        {
+            return Attributes("id", StringAttribute(id), "data", StringAttribute("payload"), "payload", StringAttribute(payload));
+        }
+
+        private static Dictionary<string, AttributeValue> KeyWithId(string id)
+        {
+            return Attributes("id", StringAttribute(id));
+        }
+
+        private static void AssertBatchWriteCandidate(
+            IReadOnlyList<KeyAffinityRequestClassifier.BatchWriteRoutingTarget> targets,
+            string tableName,
+            string operation,
+            string pkName,
+            string value)
+        {
+            Assert.That(
+                targets.Any(target =>
+                    target.TableName == tableName
+                    && target.Operation == operation
+                    && target.PartitionKeyValue(pkName)?.S == value),
+                Is.True);
         }
 
         private static AttributeValue BinaryAttribute(params int[] values)
@@ -898,39 +917,6 @@ namespace ScyllaDB.Alternator
             return new KeyValuePair<string, List<WriteRequest>>(tableName, writes.ToList());
         }
 
-        private static string AttributeLabel(AttributeValue? value)
-        {
-            if (value?.S != null)
-            {
-                return "S:" + value.S;
-            }
-
-            if (value?.N != null)
-            {
-                return "N:" + value.N;
-            }
-
-            if (value?.B != null)
-            {
-                return "B:" + Hex(value.B.ToArray());
-            }
-
-            return value?.ToString() ?? string.Empty;
-        }
-
-        private static string Hex(byte[] bytes)
-        {
-            const string HexDigits = "0123456789abcdef";
-            var chars = new char[bytes.Length * 2];
-            for (var index = 0; index < bytes.Length; index++)
-            {
-                chars[index * 2] = HexDigits[(bytes[index] >> 4) & 0x0f];
-                chars[(index * 2) + 1] = HexDigits[bytes[index] & 0x0f];
-            }
-
-            return new string(chars);
-        }
-
         private static void AssertQueryPlan(long seed, int nodeCount, string[] expectedHosts)
         {
             var nodes = Enumerable.Range(1, nodeCount).Select(index => new Uri($"http://node{index}.example.com:8043")).ToList();
@@ -989,53 +975,6 @@ namespace ScyllaDB.Alternator
                 cancellation.Token.ThrowIfCancellationRequested();
                 await Task.Delay(20, cancellation.Token);
             }
-        }
-
-        private sealed class BatchWriteVector
-        {
-            internal BatchWriteVector(
-                string name,
-                BatchWriteItemRequest request,
-                IReadOnlyDictionary<string, string> pkInfo,
-                string tableName,
-                string operation,
-                string partitionKeyLabel,
-                string canonicalAttributes,
-                long hashSigned,
-                string hashUnsigned,
-                List<string> firstSixNodes)
-            {
-                this.Name = name;
-                this.Request = request;
-                this.PkInfo = pkInfo;
-                this.TableName = tableName;
-                this.Operation = operation;
-                this.PartitionKeyLabel = partitionKeyLabel;
-                this.CanonicalAttributes = canonicalAttributes;
-                this.HashSigned = hashSigned;
-                this.HashUnsigned = hashUnsigned;
-                this.FirstSixNodes = firstSixNodes;
-            }
-
-            internal string Name { get; }
-
-            internal BatchWriteItemRequest Request { get; }
-
-            internal IReadOnlyDictionary<string, string> PkInfo { get; }
-
-            internal string TableName { get; }
-
-            internal string Operation { get; }
-
-            internal string PartitionKeyLabel { get; }
-
-            internal string CanonicalAttributes { get; }
-
-            internal long HashSigned { get; }
-
-            internal string HashUnsigned { get; }
-
-            internal List<string> FirstSixNodes { get; }
         }
     }
 }

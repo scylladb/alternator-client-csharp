@@ -430,6 +430,12 @@ namespace ScyllaDB.Alternator
             return new LazyQueryPlan(this, seed);
         }
 
+        internal LazyQueryPlan CreateQueryPlan(IEnumerable<Uri> preferredNodes)
+        {
+            this.MarkActivity();
+            return new LazyQueryPlan(this, preferredNodes);
+        }
+
         internal LazyQueryPlan CreateQueryPlan()
         {
             this.MarkActivity();
