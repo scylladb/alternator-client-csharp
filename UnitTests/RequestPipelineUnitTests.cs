@@ -4,6 +4,7 @@
 
 namespace ScyllaDB.Alternator
 {
+    using System.Net.Security;
     using System.Security.Cryptography;
     using System.Security.Cryptography.X509Certificates;
     using Amazon.DynamoDBv2.Model;
@@ -42,6 +43,35 @@ namespace ScyllaDB.Alternator
             finally
             {
                 Directory.Delete(directory, true);
+            }
+        }
+
+        [Test]
+        public void AlternatorHttpClientFactoryRejectsSystemTrustedCertificateWithHostnameMismatchTest()
+        {
+            using var certificate = LoadSystemTrustedCertificate();
+            using var chain = new X509Chain();
+            chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
+            Assert.That(chain.Build(certificate), Is.True);
+            var caPath = Path.GetTempFileName();
+            try
+            {
+                File.WriteAllText(caPath, certificate.ExportCertificatePem());
+                var tlsConfig = TlsConfig.builder()
+                    .withCaCertPath(caPath)
+                    .build();
+
+                var accepted = InvokeValidateCertificate(
+                    tlsConfig,
+                    certificate,
+                    chain,
+                    SslPolicyErrors.RemoteCertificateNameMismatch);
+
+                Assert.That(accepted, Is.False);
+            }
+            finally
+            {
+                File.Delete(caPath);
             }
         }
 
@@ -303,6 +333,30 @@ namespace ScyllaDB.Alternator
             };
         }
 
+        private static X509Certificate2 LoadSystemTrustedCertificate()
+        {
+            var certificate = TryLoadSystemTrustedCertificate(StoreLocation.CurrentUser)
+                ?? TryLoadSystemTrustedCertificate(StoreLocation.LocalMachine);
+            if (certificate == null)
+            {
+                Assert.Ignore("No system root certificate is available for TLS validation tests.");
+            }
+
+            return certificate;
+        }
+
+        private static X509Certificate2? TryLoadSystemTrustedCertificate(StoreLocation storeLocation)
+        {
+            using var store = new X509Store(StoreName.Root, storeLocation);
+            store.Open(OpenFlags.ReadOnly);
+            var now = DateTime.Now;
+            var certificate = store.Certificates
+                .FirstOrDefault(candidate => candidate.NotBefore <= now && candidate.NotAfter >= now);
+            return certificate == null
+                ? null
+                : new X509Certificate2(certificate.Export(X509ContentType.Cert));
+        }
+
         private static void InvokeCompressRequest(GzipRequestPipelineHandler handler, IRequest? request)
         {
             var method = typeof(GzipRequestPipelineHandler).GetMethod(
@@ -318,6 +372,27 @@ namespace ScyllaDB.Alternator
             {
                 throw exception.InnerException;
             }
+        }
+
+        private static bool InvokeValidateCertificate(
+            TlsConfig tlsConfig,
+            X509Certificate2 certificate,
+            X509Chain chain,
+            SslPolicyErrors sslPolicyErrors)
+        {
+            var factoryType = typeof(AlternatorConfig).Assembly.GetType("ScyllaDB.Alternator.AlternatorHttpClientFactory");
+            Assert.That(factoryType, Is.Not.Null);
+
+            var method = factoryType!.GetMethod(
+                "ValidateCertificate",
+                System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic,
+                null,
+                new[] { typeof(TlsConfig), typeof(X509Certificate2), typeof(X509Chain), typeof(SslPolicyErrors) },
+                null);
+            Assert.That(method, Is.Not.Null);
+            var value = method!.Invoke(null, new object?[] { tlsConfig, certificate, chain, sslPolicyErrors });
+            Assert.That(value, Is.Not.Null);
+            return (bool)value!;
         }
 
         private static HttpClientHandler CreateAlternatorHttpClientHandler(

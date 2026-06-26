@@ -184,14 +184,21 @@ namespace ScyllaDB.Alternator
                 return true;
             }
 
+            var unsupportedErrors = errorsWithoutNameMismatch & ~SslPolicyErrors.RemoteCertificateChainErrors;
+            if (unsupportedErrors != SslPolicyErrors.None)
+            {
+                return false;
+            }
+
             if (certificate == null || tlsConfig.CustomCaCertPaths.Count == 0)
             {
                 return false;
             }
 
+            var hostnameAccepted = !tlsConfig.VerifyHostname || !hasNameMismatch;
             if (tlsConfig.TrustSystemCaCerts && chain != null && chain.Build(certificate))
             {
-                return true;
+                return hostnameAccepted;
             }
 
             using var customChain = new X509Chain();
@@ -205,7 +212,7 @@ namespace ScyllaDB.Alternator
             var chainValid = customChain.Build(certificate);
             if (chainValid)
             {
-                return !tlsConfig.VerifyHostname || !hasNameMismatch;
+                return hostnameAccepted;
             }
 
             return false;
