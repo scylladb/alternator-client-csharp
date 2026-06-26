@@ -12,7 +12,8 @@ namespace ScyllaDB.Alternator
             null,
             false,
             true,
-            false);
+            false,
+            true);
 
         private static readonly TlsConfig SystemDefaultInstance = new TlsConfig(
             new List<string>(),
@@ -20,6 +21,7 @@ namespace ScyllaDB.Alternator
             null,
             true,
             false,
+            true,
             true);
 
         internal TlsConfig(
@@ -28,7 +30,8 @@ namespace ScyllaDB.Alternator
             string? clientPrivateKeyPath,
             bool trustSystemCaCerts,
             bool trustAllCertificates,
-            bool verifyHostname)
+            bool verifyHostname,
+            bool tlsSessionResumptionEnabled)
         {
             this.CustomCaCertPaths = new List<string>(customCaCertPaths ?? Array.Empty<string>()).AsReadOnly();
             this.ClientCertificatePath = clientCertificatePath;
@@ -36,6 +39,7 @@ namespace ScyllaDB.Alternator
             this.TrustSystemCaCerts = trustSystemCaCerts;
             this.TrustAllCertificates = trustAllCertificates;
             this.VerifyHostname = verifyHostname;
+            this.TlsSessionResumptionEnabled = tlsSessionResumptionEnabled;
         }
 
         public IReadOnlyList<string> CustomCaCertPaths { get; }
@@ -51,6 +55,8 @@ namespace ScyllaDB.Alternator
         public bool TrustAllCertificates { get; }
 
         public bool VerifyHostname { get; }
+
+        public bool TlsSessionResumptionEnabled { get; }
 
         public static TlsConfig TrustAll()
         {
@@ -118,6 +124,11 @@ namespace ScyllaDB.Alternator
             return this.VerifyHostname;
         }
 
+        public bool isTlsSessionResumptionEnabled()
+        {
+            return this.TlsSessionResumptionEnabled;
+        }
+
 #pragma warning restore SA1300, IDE1006
 
         public override string ToString()
@@ -137,6 +148,8 @@ namespace ScyllaDB.Alternator
                 + this.TrustAllCertificates.ToString().ToLowerInvariant()
                 + ", verifyHostname="
                 + this.VerifyHostname.ToString().ToLowerInvariant()
+                + ", tlsSessionResumptionEnabled="
+                + this.TlsSessionResumptionEnabled.ToString().ToLowerInvariant()
                 + "}";
         }
 
@@ -146,6 +159,7 @@ namespace ScyllaDB.Alternator
                 && this.TrustSystemCaCerts == other.TrustSystemCaCerts
                 && this.TrustAllCertificates == other.TrustAllCertificates
                 && this.VerifyHostname == other.VerifyHostname
+                && this.TlsSessionResumptionEnabled == other.TlsSessionResumptionEnabled
                 && this.CustomCaCertPaths.SequenceEqual(other.CustomCaCertPaths)
                 && string.Equals(this.ClientCertificatePath, other.ClientCertificatePath, StringComparison.Ordinal)
                 && string.Equals(this.ClientPrivateKeyPath, other.ClientPrivateKeyPath, StringComparison.Ordinal);
@@ -164,6 +178,7 @@ namespace ScyllaDB.Alternator
             hash.Add(this.TrustSystemCaCerts);
             hash.Add(this.TrustAllCertificates);
             hash.Add(this.VerifyHostname);
+            hash.Add(this.TlsSessionResumptionEnabled);
             return hash.ToHashCode();
         }
     }

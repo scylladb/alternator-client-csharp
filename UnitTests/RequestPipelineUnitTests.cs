@@ -47,6 +47,29 @@ namespace ScyllaDB.Alternator
         }
 
         [Test]
+        public void AlternatorHttpClientFactoryAppliesTlsSessionResumptionSettingTest()
+        {
+            var defaultConfig = AlternatorConfig.builder()
+                .withTlsConfig(TlsConfig.systemDefault())
+                .build();
+            using var defaultHandler = CreateAlternatorSocketsHttpHandler(defaultConfig, _ => { });
+            Assert.That(defaultHandler.SslOptions.AllowTlsResume, Is.True);
+
+            var disabledTlsConfig = TlsConfig.builder()
+                .withTlsSessionResumption(false)
+                .build();
+            var disabledConfig = AlternatorConfig.builder()
+                .withTlsConfig(disabledTlsConfig)
+                .build();
+            using var disabledHandler = CreateAlternatorSocketsHttpHandler(disabledConfig, _ => { });
+            Assert.That(disabledHandler.SslOptions.AllowTlsResume, Is.False);
+
+            var exception = Assert.Throws<NotSupportedException>(() =>
+                CreateAlternatorHttpClientHandler(disabledTlsConfig, 10, _ => { }));
+            Assert.That(exception!.Message, Does.Contain("SocketsHttpHandler"));
+        }
+
+        [Test]
         public void AlternatorHttpClientFactoryRejectsSystemTrustedCertificateWithHostnameMismatchTest()
         {
             using var certificate = LoadSystemTrustedCertificate();
@@ -407,7 +430,16 @@ namespace ScyllaDB.Alternator
                 "CreateHandler",
                 System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
             Assert.That(method, Is.Not.Null);
-            var value = method!.Invoke(null, new object?[] { tlsConfig, maxConnections, customizer });
+            object? value;
+            try
+            {
+                value = method!.Invoke(null, new object?[] { tlsConfig, maxConnections, customizer });
+            }
+            catch (System.Reflection.TargetInvocationException exception) when (exception.InnerException != null)
+            {
+                throw exception.InnerException;
+            }
+
             Assert.That(value, Is.Not.Null);
             return (HttpClientHandler)value!;
         }
