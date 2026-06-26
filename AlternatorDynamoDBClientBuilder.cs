@@ -381,12 +381,6 @@ namespace ScyllaDB.Alternator
             return this;
         }
 
-        public AlternatorDynamoDBClientBuilder WithTlsSessionCacheConfig(TlsSessionCacheConfig? tlsSessionCacheConfig)
-        {
-            this.configBuilder.WithTlsSessionCacheConfig(tlsSessionCacheConfig);
-            return this;
-        }
-
         public AlternatorDynamoDBClientBuilder WithDisableCertificateChecks()
         {
             this.disableCertificateChecks = true;
@@ -678,11 +672,6 @@ namespace ScyllaDB.Alternator
             return this.WithTlsConfig(tlsConfig);
         }
 
-        public AlternatorDynamoDBClientBuilder withTlsSessionCacheConfig(TlsSessionCacheConfig? tlsSessionCacheConfig)
-        {
-            return this.WithTlsSessionCacheConfig(tlsSessionCacheConfig);
-        }
-
         public AlternatorDynamoDBClientBuilder withActiveRefreshIntervalMs(long intervalMs)
         {
             return this.WithActiveRefreshIntervalMs(intervalMs);
@@ -843,7 +832,6 @@ namespace ScyllaDB.Alternator
                 .WithUserAgentEnabled(config.UserAgentEnabled)
                 .WithAuthenticationEnabled(config.AuthenticationEnabled)
                 .WithTlsConfig(tlsConfig)
-                .WithTlsSessionCacheConfig(config.TlsSessionCacheConfig)
                 .WithKeyRouteAffinity(config.KeyRouteAffinityConfig)
                 .WithActiveRefreshIntervalMs(config.ActiveRefreshIntervalMs)
                 .WithIdleRefreshIntervalMs(config.IdleRefreshIntervalMs)
@@ -1052,7 +1040,6 @@ namespace ScyllaDB.Alternator
                 .WithUserAgentEnabled(config.UserAgentEnabled)
                 .WithAuthenticationEnabled(config.AuthenticationEnabled)
                 .WithTlsConfig(config.TlsConfig)
-                .WithTlsSessionCacheConfig(config.TlsSessionCacheConfig)
                 .WithKeyRouteAffinity(config.KeyRouteAffinityConfig)
                 .WithActiveRefreshIntervalMs(config.ActiveRefreshIntervalMs)
                 .WithIdleRefreshIntervalMs(config.IdleRefreshIntervalMs)

@@ -475,7 +475,6 @@ namespace ScyllaDB.Alternator
                 .WithUserAgentEnabled(config.UserAgentEnabled)
                 .WithAuthenticationEnabled(config.AuthenticationEnabled)
                 .WithTlsConfig(config.TlsConfig)
-                .WithTlsSessionCacheConfig(config.TlsSessionCacheConfig)
                 .WithKeyRouteAffinity(config.KeyRouteAffinityConfig)
                 .WithActiveRefreshIntervalMs(config.ActiveRefreshIntervalMs)
                 .WithIdleRefreshIntervalMs(config.IdleRefreshIntervalMs)

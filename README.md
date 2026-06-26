@@ -211,20 +211,6 @@ TlsConfig trustAll = TlsConfig.trustAll();
 TlsConfig systemDefault = TlsConfig.systemDefault();
 ```
 
-TLS session cache configuration mirrors the Java API:
-
-```csharp
-var sessionCache = TlsSessionCacheConfig.builder()
-    .withEnabled(true)
-    .withSessionCacheSize(1024)
-    .withSessionTimeoutSeconds(86400)
-    .build();
-
-var tls = TlsConfig.builder()
-    .withSessionCacheConfig(sessionCache)
-    .build();
-```
-
 ## Compression and Header Optimization
 
 Request compression is installed in the AWS SDK runtime pipeline before request signing.
