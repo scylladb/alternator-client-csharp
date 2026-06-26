@@ -4,6 +4,9 @@
 
 namespace ScyllaDB.Alternator
 {
+    using ScyllaDB.Alternator.KeyRouting;
+    using ScyllaDB.Alternator.Routing;
+
     /// <summary>
     /// Builder for configuring Helper options using a fluent API.
     /// </summary>
@@ -63,6 +66,12 @@ namespace ScyllaDB.Alternator
             return this;
         }
 
+        public HelperOptionsBuilder WithRoutingScope(RoutingScope? routingScope)
+        {
+            this.options.RoutingScope = routingScope;
+            return this;
+        }
+
         /// <summary>
         /// Sets whether to validate the connection during initialization.
         /// </summary>
@@ -116,6 +125,80 @@ namespace ScyllaDB.Alternator
             return this;
         }
 
+        public HelperOptionsBuilder WithActiveRefreshIntervalMs(long intervalMs)
+        {
+            if (intervalMs <= 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(intervalMs));
+            }
+
+            this.options.ActiveRefreshIntervalMs = intervalMs;
+            return this;
+        }
+
+        public HelperOptionsBuilder WithIdleRefreshIntervalMs(long intervalMs)
+        {
+            if (intervalMs <= 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(intervalMs));
+            }
+
+            this.options.IdleRefreshIntervalMs = intervalMs;
+            return this;
+        }
+
+        public HelperOptionsBuilder WithTlsConfig(TlsConfig tlsConfig)
+        {
+            this.options.TlsConfig = tlsConfig ?? TlsConfig.TrustAll();
+            return this;
+        }
+
+        public HelperOptionsBuilder WithCompressionAlgorithm(RequestCompressionAlgorithm algorithm)
+        {
+            this.options.CompressionAlgorithm = algorithm;
+            return this;
+        }
+
+        public HelperOptionsBuilder WithMinCompressionSizeBytes(int minCompressionSizeBytes)
+        {
+            if (minCompressionSizeBytes < 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(minCompressionSizeBytes));
+            }
+
+            this.options.MinCompressionSizeBytes = minCompressionSizeBytes;
+            return this;
+        }
+
+        public HelperOptionsBuilder WithOptimizeHeaders(bool optimizeHeaders)
+        {
+            this.options.OptimizeHeaders = optimizeHeaders;
+            return this;
+        }
+
+        public HelperOptionsBuilder WithHeadersWhitelist(IEnumerable<string> headers)
+        {
+            if (headers == null)
+            {
+                throw new ArgumentNullException(nameof(headers));
+            }
+
+            this.options.HeadersWhitelist = new HashSet<string>(headers, StringComparer.OrdinalIgnoreCase);
+            return this;
+        }
+
+        public HelperOptionsBuilder WithKeyRouteAffinity(KeyRouteAffinityConfig keyRouteAffinityConfig)
+        {
+            this.options.KeyRouteAffinityConfig = keyRouteAffinityConfig;
+            return this;
+        }
+
+        public HelperOptionsBuilder WithKeyRouteAffinity(KeyRouteAffinity type)
+        {
+            this.options.KeyRouteAffinityConfig = KeyRouteAffinityConfig.Of(type);
+            return this;
+        }
+
         /// <summary>
         /// Sets the initial nodes, schema and port for connecting to ScyllaDB Alternator from provided Uri.
         /// </summary>
@@ -123,10 +206,30 @@ namespace ScyllaDB.Alternator
         /// <returns>The builder instance for method chaining.</returns>
         public HelperOptionsBuilder WithInitialNodeUri(Uri uri)
         {
+            if (uri == null)
+            {
+                throw new ArgumentNullException(nameof(uri));
+            }
+
             this.options.InitialNodes = new List<string> { uri.Host };
             this.options.Port = uri.Port;
             this.options.Schema = uri.Scheme;
             return this;
+        }
+
+        /// <summary>
+        /// Sets the initial nodes, schema and port for connecting to ScyllaDB Alternator from provided Uri.
+        /// </summary>
+        /// <param name="uri">Uri string of the single initial node.</param>
+        /// <returns>The builder instance for method chaining.</returns>
+        public HelperOptionsBuilder WithInitialNodeUri(string uri)
+        {
+            if (string.IsNullOrWhiteSpace(uri))
+            {
+                throw new ArgumentException("Uri cannot be null or empty.", nameof(uri));
+            }
+
+            return this.WithInitialNodeUri(new Uri(uri));
         }
 
         /// <summary>

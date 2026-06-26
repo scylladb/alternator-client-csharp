@@ -5,6 +5,7 @@
 namespace ScyllaDB.Alternator
 {
     using Amazon.Runtime.Endpoints;
+    using ScyllaDB.Alternator.KeyRouting;
 
     public class Helper : IEndpointProvider
     {
@@ -16,41 +17,56 @@ namespace ScyllaDB.Alternator
         /// </summary>
         /// <param name="options">The helper configuration options.</param>
         public Helper(HelperOptions options)
+            : this(options, options?.ToAlternatorConfig())
         {
-            if (options == null)
+        }
+
+        public Helper(AlternatorConfig config)
+            : this(null, config)
+        {
+        }
+
+        internal Helper(
+            AlternatorConfig config,
+            bool validateOnInitialization,
+            bool startImmediately,
+            CancellationToken cancellationToken)
+            : this(null, config, validateOnInitialization, startImmediately, cancellationToken)
+        {
+        }
+
+        private Helper(HelperOptions? options, AlternatorConfig? config)
+            : this(
+                options,
+                config,
+                options?.ValidateOnInitialization ?? true,
+                options?.StartImmediately ?? true,
+                options?.CancellationToken ?? CancellationToken.None)
+        {
+        }
+
+        private Helper(
+            HelperOptions? options,
+            AlternatorConfig? config,
+            bool validateOnInitialization,
+            bool startImmediately,
+            CancellationToken cancellationToken)
+        {
+            if (config == null)
             {
-                throw new ArgumentNullException(nameof(options));
+                throw new ArgumentNullException(nameof(config));
             }
 
-            if (options.InitialNodes != null && options.InitialNodes.Count > 0)
-            {
-                // New approach with multiple initial nodes
-                var nodeUris = new List<Uri>();
-                foreach (var node in options.InitialNodes)
-                {
-                    var uri = new Uri($"{options.Schema}://{node}:{options.Port}");
-                    nodeUris.Add(uri);
-                }
+            this.liveNodes = new AlternatorLiveNodes(config);
 
-                this.liveNodes = new AlternatorLiveNodes(nodeUris, options.Schema, options.Port, options.Datacenter, options.Rack);
-            }
-            else
-            {
-                throw new ArgumentException("InitialNodes must be provided.", nameof(options));
-            }
-
-            if (options.ValidateOnInitialization)
+            if (validateOnInitialization)
             {
                 try
                 {
                     this.liveNodes.Validate();
-                    this.liveNodes.CheckIfRackAndDatacenterSetCorrectly();
-                    if (options.Datacenter.Length != 0 || options.Rack.Length != 0)
+                    if (!this.liveNodes.CheckIfRoutingScopeFeatureIsSupported())
                     {
-                        if (!this.liveNodes.CheckIfRackDatacenterFeatureIsSupported())
-                        {
-                            Logger.Error($"server does not support rack or datacenter filtering");
-                        }
+                        Logger.Error("server does not support rack or datacenter filtering");
                     }
                 }
                 catch (Exception e)
@@ -59,9 +75,9 @@ namespace ScyllaDB.Alternator
                 }
             }
 
-            if (options.StartImmediately)
+            if (startImmediately)
             {
-                this.liveNodes.Start(options.CancellationToken);
+                this.liveNodes.Start(cancellationToken);
             }
         }
 
@@ -77,6 +93,83 @@ namespace ScyllaDB.Alternator
         public void Start(CancellationToken cancellationToken = default)
         {
             this.liveNodes.Start(cancellationToken);
+        }
+
+        public void Stop()
+        {
+            this.liveNodes.Shutdown();
+        }
+
+        public bool IsRunning()
+        {
+            return this.liveNodes.IsRunning();
+        }
+
+        public bool CheckIfRackDatacenterFeatureIsSupported()
+        {
+            return this.liveNodes.CheckIfRackDatacenterFeatureIsSupported();
+        }
+
+        public AlternatorLiveNodes GetAlternatorLiveNodes()
+        {
+            return this.liveNodes;
+        }
+
+        public IReadOnlyList<Uri> GetLiveNodes()
+        {
+            return this.liveNodes.GetLiveNodes();
+        }
+
+        public Uri NextAsUri()
+        {
+            return this.liveNodes.NextAsUri();
+        }
+
+#pragma warning disable SA1300, IDE1006
+        public void start()
+        {
+            this.Start();
+        }
+
+        public void stop()
+        {
+            this.Stop();
+        }
+
+        public bool isRunning()
+        {
+            return this.IsRunning();
+        }
+
+        public IReadOnlyList<Uri> getLiveNodes()
+        {
+            return this.GetLiveNodes();
+        }
+
+        public Uri nextAsURI()
+        {
+            return this.NextAsUri();
+        }
+
+        public AlternatorLiveNodes getAlternatorLiveNodes()
+        {
+            return this.GetAlternatorLiveNodes();
+        }
+#pragma warning restore SA1300, IDE1006
+
+        internal Uri GetNodeForHash(long hash)
+        {
+            return this.liveNodes.GetNodeForHash(hash);
+        }
+
+        internal LazyQueryPlan CreateQueryPlan(long seed)
+        {
+            return this.liveNodes.CreateQueryPlan(seed);
+        }
+
+        internal LazyQueryPlan CreateQueryPlan()
+        {
+            return this.liveNodes.CreateQueryPlan();
         }
     }
 }

@@ -7,6 +7,8 @@ namespace ScyllaDB.Alternator
     using System;
     using System.Collections.Generic;
     using System.Threading;
+    using ScyllaDB.Alternator.KeyRouting;
+    using ScyllaDB.Alternator.Routing;
 
     /// <summary>
     /// Configuration options for the Helper class.
@@ -54,5 +56,64 @@ namespace ScyllaDB.Alternator
         /// Gets or sets the cancellation token for initialization operations.
         /// </summary>
         public CancellationToken CancellationToken { get; set; } = CancellationToken.None;
+
+        public RoutingScope? RoutingScope { get; set; }
+
+        public long ActiveRefreshIntervalMs { get; set; } = AlternatorConfig.DefaultActiveRefreshIntervalMs;
+
+        public long IdleRefreshIntervalMs { get; set; } = AlternatorConfig.DefaultIdleRefreshIntervalMs;
+
+        public TlsConfig TlsConfig { get; set; } = TlsConfig.TrustAll();
+
+        public RequestCompressionAlgorithm CompressionAlgorithm { get; set; } = RequestCompressionAlgorithm.None;
+
+        public int MinCompressionSizeBytes { get; set; } = AlternatorConfig.DefaultMinCompressionSizeBytes;
+
+        public bool OptimizeHeaders { get; set; }
+
+        public ISet<string>? HeadersWhitelist { get; set; }
+
+        public bool AuthenticationEnabled { get; set; } = true;
+
+        public KeyRouteAffinityConfig? KeyRouteAffinityConfig { get; set; }
+
+        internal AlternatorConfig ToAlternatorConfig()
+        {
+            var builder = AlternatorConfig.Builder()
+                .WithSeedHosts(this.InitialNodes)
+                .WithScheme(this.Schema)
+                .WithPort(this.Port)
+                .WithCompressionAlgorithm(this.CompressionAlgorithm)
+                .WithMinCompressionSizeBytes(this.MinCompressionSizeBytes)
+                .WithOptimizeHeaders(this.OptimizeHeaders)
+                .WithAuthenticationEnabled(this.AuthenticationEnabled)
+                .WithKeyRouteAffinity(this.KeyRouteAffinityConfig)
+                .WithActiveRefreshIntervalMs(this.ActiveRefreshIntervalMs)
+                .WithIdleRefreshIntervalMs(this.IdleRefreshIntervalMs)
+                .WithTlsConfig(this.TlsConfig);
+
+            if (this.HeadersWhitelist != null)
+            {
+                builder.WithHeadersWhitelist(this.HeadersWhitelist);
+            }
+
+            if (this.RoutingScope != null)
+            {
+                builder.WithRoutingScope(this.RoutingScope);
+            }
+            else if (!string.IsNullOrEmpty(this.Datacenter) && !string.IsNullOrEmpty(this.Rack))
+            {
+                builder.WithRoutingScope(RackScope.Of(
+                    this.Datacenter,
+                    this.Rack,
+                    DatacenterScope.Of(this.Datacenter, ClusterScope.Create())));
+            }
+            else if (!string.IsNullOrEmpty(this.Datacenter))
+            {
+                builder.WithRoutingScope(DatacenterScope.Of(this.Datacenter, ClusterScope.Create()));
+            }
+
+            return builder.Build();
+        }
     }
 }
