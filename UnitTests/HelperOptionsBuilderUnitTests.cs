@@ -78,5 +78,24 @@ namespace ScyllaDB.Alternator
 
             Assert.That(helper, Is.Not.Null);
         }
+
+        [Test]
+        [Category("Unit")]
+        public void HelperOptionsBuilderSupportsCustomHeaderOptimizerTest()
+        {
+            var options = HelperOptionsBuilder.Create()
+                .WithInitialNodeUri(new Uri("http://127.0.0.1:8080"))
+                .WithCustomOptimizeHeaders(config => config.RequiredHeaders.Concat(new[] { "X-Helper-Trace" }))
+                .WithoutValidation()
+                .WithDeferredStart()
+                .Build();
+
+            using var wrapper = AlternatorDynamoDBClient.builder()
+                .WithOptions(options)
+                .buildWithAlternatorAPI();
+
+            Assert.That(wrapper.Config.OptimizeHeaders, Is.True);
+            Assert.That(wrapper.Config.HeadersWhitelist, Does.Contain("X-Helper-Trace"));
+        }
     }
 }

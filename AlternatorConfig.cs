@@ -79,6 +79,8 @@ namespace ScyllaDB.Alternator
             int minCompressionSizeBytes,
             bool optimizeHeaders,
             ISet<string>? headersWhitelist,
+            bool headersWhitelistWasSet,
+            Func<AlternatorConfig, IEnumerable<string>>? customOptimizeHeaders,
             bool userAgentEnabled,
             bool authenticationEnabled,
             KeyRouteAffinityConfig? keyRouteAffinityConfig,
@@ -100,7 +102,9 @@ namespace ScyllaDB.Alternator
             this.OptimizeHeaders = optimizeHeaders;
             this.UserAgentEnabled = userAgentEnabled;
             this.AuthenticationEnabled = authenticationEnabled;
-            this.HeadersWhitelist = this.CreateHeadersWhitelist(headersWhitelist);
+            this.HeadersWhitelistWasSet = headersWhitelistWasSet;
+            this.CustomOptimizeHeaders = customOptimizeHeaders;
+            this.HeadersWhitelist = this.GetRequiredHeaders();
             this.KeyRouteAffinityConfig = keyRouteAffinityConfig;
             this.ActiveRefreshIntervalMs = activeRefreshIntervalMs > 0 ? activeRefreshIntervalMs : DefaultActiveRefreshIntervalMs;
             this.IdleRefreshIntervalMs = idleRefreshIntervalMs > 0 ? idleRefreshIntervalMs : DefaultIdleRefreshIntervalMs;
@@ -110,6 +114,7 @@ namespace ScyllaDB.Alternator
             this.ConnectionAcquisitionTimeoutMs = connectionAcquisitionTimeoutMs;
             this.ConnectionTimeoutMs = connectionTimeoutMs;
             this.TlsConfig = tlsConfig;
+            this.HeadersWhitelist = this.CreateHeadersWhitelist(headersWhitelist, customOptimizeHeaders);
         }
 
         public IReadOnlyList<string> SeedHosts { get; }
@@ -151,6 +156,10 @@ namespace ScyllaDB.Alternator
         public TlsConfig TlsConfig { get; }
 
         public IReadOnlySet<string> RequiredHeaders => this.GetRequiredHeaders();
+
+        internal bool HeadersWhitelistWasSet { get; }
+
+        internal Func<AlternatorConfig, IEnumerable<string>>? CustomOptimizeHeaders { get; }
 
         public static AlternatorConfigBuilder Builder()
         {
@@ -292,14 +301,56 @@ namespace ScyllaDB.Alternator
             return new ReadOnlySet<string>(headers, StringComparer.OrdinalIgnoreCase);
         }
 
-        private IReadOnlySet<string> CreateHeadersWhitelist(ISet<string>? headersWhitelist)
+        internal AlternatorConfigBuilder CopyHeaderOptimizationTo(AlternatorConfigBuilder builder)
+        {
+            if (this.CustomOptimizeHeaders != null)
+            {
+                builder.WithCustomOptimizeHeaders(this.CustomOptimizeHeaders)
+                    .WithOptimizeHeaders(this.OptimizeHeaders);
+                return builder;
+            }
+
+            if (this.HeadersWhitelistWasSet)
+            {
+                builder.WithHeadersWhitelist(this.HeadersWhitelist);
+            }
+
+            return builder;
+        }
+
+        private IReadOnlySet<string> CreateHeadersWhitelist(
+            ISet<string>? headersWhitelist,
+            Func<AlternatorConfig, IEnumerable<string>>? customOptimizeHeaders)
         {
             if (headersWhitelist != null)
             {
                 return CreateReadOnlyHeaderSet(headersWhitelist);
             }
 
+            if (customOptimizeHeaders != null)
+            {
+                var headers = customOptimizeHeaders(this);
+                if (headers == null)
+                {
+                    throw new ArgumentException("Custom header optimizer cannot return null.", nameof(customOptimizeHeaders));
+                }
+
+                var optimized = CreateReadOnlyHeaderSet(headers);
+                this.ValidateRequiredHeaders(optimized, "Custom header optimizer is missing required headers: ");
+                return optimized;
+            }
+
             return this.GetRequiredHeaders();
+        }
+
+        private void ValidateRequiredHeaders(IEnumerable<string> headers, string messagePrefix)
+        {
+            var missing = new HashSet<string>(this.GetRequiredHeaders(), StringComparer.OrdinalIgnoreCase);
+            missing.ExceptWith(headers);
+            if (missing.Count != 0)
+            {
+                throw new ArgumentException(messagePrefix + string.Join(", ", missing));
+            }
         }
     }
 }

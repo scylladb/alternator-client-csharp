@@ -240,7 +240,24 @@ AmazonDynamoDBClient client = AlternatorDynamoDBClient.builder()
     .build();
 ```
 
-Header optimization filters outgoing HTTP headers to the configured whitelist.
+Header optimization filters outgoing HTTP headers to an allow-list. If no
+allow-list is supplied, the client computes one from the effective Alternator
+configuration. The computed list keeps the required transport headers and adds
+authentication, request compression, and User-Agent headers when those features
+are enabled.
+
+```csharp
+AmazonDynamoDBClient client = AlternatorDynamoDBClient.builder()
+    .endpointOverride("http://127.0.0.1:8000")
+    .credentialsProvider(credentials)
+    .withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP)
+    .withOptimizeHeaders(true)
+    .build();
+```
+
+Use a static whitelist when the exact header set should not change after it is
+configured. Static whitelists are validated against the required headers for the
+effective configuration.
 
 ```csharp
 var configBuilder = AlternatorConfig.builder()
@@ -255,6 +272,19 @@ AmazonDynamoDBClient client = AlternatorDynamoDBClient.builder()
     .withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP)
     .withOptimizeHeaders(true)
     .withHeadersWhitelist(headers)
+    .build();
+```
+
+Use a custom optimizer when the allow-list should be computed from the final
+configuration.
+
+```csharp
+AmazonDynamoDBClient client = AlternatorDynamoDBClient.builder()
+    .endpointOverride("http://127.0.0.1:8000")
+    .credentialsProvider(credentials)
+    .withOptimizeHeaders(true)
+    .withCustomOptimizeHeaders(config =>
+        config.getRequiredHeaders().Concat(new[] { "X-Custom-Trace" }))
     .build();
 ```
 

@@ -184,6 +184,15 @@ namespace ScyllaDB.Alternator
             }
 
             this.options.HeadersWhitelist = new HashSet<string>(headers, StringComparer.OrdinalIgnoreCase);
+            this.options.CustomOptimizeHeaders = null;
+            return this;
+        }
+
+        public HelperOptionsBuilder WithCustomOptimizeHeaders(Func<AlternatorConfig, IEnumerable<string>> customOptimizeHeaders)
+        {
+            this.options.CustomOptimizeHeaders = customOptimizeHeaders ?? throw new ArgumentNullException(nameof(customOptimizeHeaders));
+            this.options.HeadersWhitelist = null;
+            this.options.OptimizeHeaders = true;
             return this;
         }
 

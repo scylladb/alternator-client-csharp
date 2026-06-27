@@ -137,5 +137,69 @@ namespace ScyllaDB.Alternator
                 .withHeadersWhitelist(new[] { "Host" })
                 .build());
         }
+
+        [Test]
+        public void AlternatorConfigBuilderComputesOptimizedHeadersFromEffectiveConfigTest()
+        {
+            var minimal = AlternatorConfig.builder()
+                .withAuthenticationEnabled(false)
+                .withUserAgentEnabled(false)
+                .build();
+
+            Assert.That(minimal.HeadersWhitelist, Is.EquivalentTo(AlternatorConfig.BaseRequiredHeaders));
+            Assert.That(minimal.HeadersWhitelist, Does.Not.Contain("Authorization"));
+            Assert.That(minimal.HeadersWhitelist, Does.Not.Contain("Content-Encoding"));
+            Assert.That(minimal.HeadersWhitelist, Does.Not.Contain("User-Agent"));
+
+            var enabled = AlternatorConfig.builder()
+                .withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP)
+                .withAuthenticationEnabled(true)
+                .withUserAgentEnabled(true)
+                .build();
+
+            Assert.That(enabled.HeadersWhitelist, Does.Contain("Authorization"));
+            Assert.That(enabled.HeadersWhitelist, Does.Contain("X-Amz-Date"));
+            Assert.That(enabled.HeadersWhitelist, Does.Contain("Content-Encoding"));
+            Assert.That(enabled.HeadersWhitelist, Does.Contain("User-Agent"));
+        }
+
+        [Test]
+        public void AlternatorConfigBuilderSupportsCustomHeaderOptimizerTest()
+        {
+            var calledWithEffectiveConfig = false;
+            var config = AlternatorConfig.builder()
+                .withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP)
+                .withCustomOptimizeHeaders(effectiveConfig =>
+                {
+                    calledWithEffectiveConfig = effectiveConfig.CompressionAlgorithm == RequestCompressionAlgorithm.Gzip
+                        && effectiveConfig.AuthenticationEnabled
+                        && effectiveConfig.UserAgentEnabled;
+                    return effectiveConfig.RequiredHeaders.Concat(new[] { "X-Custom-Trace" });
+                })
+                .build();
+
+            Assert.That(calledWithEffectiveConfig, Is.True);
+            Assert.That(config.OptimizeHeaders, Is.True);
+            Assert.That(config.HeadersWhitelist, Does.Contain("X-Custom-Trace"));
+            Assert.That(config.HeadersWhitelist, Is.SupersetOf(config.RequiredHeaders));
+            Assert.That(AlternatorConfig.builder().withCustomOptimizeHeaders(effectiveConfig => effectiveConfig.RequiredHeaders), Is.Not.Null);
+        }
+
+        [Test]
+        public void AlternatorConfigBuilderValidatesCustomHeaderOptimizerTest()
+        {
+            Assert.Throws<ArgumentNullException>(() => AlternatorConfig.builder()
+                .withCustomOptimizeHeaders(null!));
+
+            var missingRequired = Assert.Throws<ArgumentException>(() => AlternatorConfig.builder()
+                .withCustomOptimizeHeaders(_ => new[] { "Host" })
+                .build());
+            Assert.That(missingRequired!.Message, Does.Contain("Custom header optimizer is missing required headers"));
+
+            var nullHeaders = Assert.Throws<ArgumentException>(() => AlternatorConfig.builder()
+                .withCustomOptimizeHeaders(_ => null!)
+                .build());
+            Assert.That(nullHeaders!.Message, Does.Contain("Custom header optimizer cannot return null"));
+        }
     }
 }
