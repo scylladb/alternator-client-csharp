@@ -15,8 +15,8 @@ namespace ScyllaDB.Alternator
         public long DownNodeProbePeriodMs { get; init; } =
             AlternatorConfig.DefaultDownNodeProbePeriodMs;
 
-        public int QuarantineTrafficInterval { get; init; } =
-            AlternatorConfig.DefaultQuarantineTrafficInterval;
+        public int QuarantinedNodeSamplingInterval { get; init; } =
+            AlternatorConfig.DefaultQuarantinedNodeSamplingInterval;
 
         public long ServerRequestTimeoutThresholdMs { get; init; } =
             AlternatorConfig.DefaultServerRequestTimeoutThresholdMs;
@@ -43,7 +43,7 @@ namespace ScyllaDB.Alternator
                 ConsecutiveServerErrorThreshold = Math.Max(1, config.ConsecutiveServerErrorThreshold),
                 QuarantineSuccessThreshold = Math.Max(1, config.QuarantineSuccessThreshold),
                 DownNodeProbePeriodMs = Math.Max(1, config.DownNodeProbePeriodMs),
-                QuarantineTrafficInterval = Math.Max(1, config.QuarantineTrafficInterval),
+                QuarantinedNodeSamplingInterval = Math.Max(1, config.QuarantinedNodeSamplingInterval),
                 ServerRequestTimeoutThresholdMs = config.ServerRequestTimeoutThresholdMs,
                 Disabled = config.Disabled,
             };

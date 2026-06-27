@@ -91,7 +91,7 @@ namespace ScyllaDB.Alternator
             var liveNodes = CreateLiveNodes(
                 new[] { "node1.example.com", "node2.example.com" },
                 builder => builder
-                    .withQuarantineTrafficInterval(2)
+                    .withQuarantinedNodeSamplingInterval(2)
                     .withQuarantineSuccessThreshold(3),
                 pollingHttpClient);
             var activeNode = Node("node1.example.com");
@@ -217,7 +217,7 @@ namespace ScyllaDB.Alternator
                 .withConsecutiveServerErrorThreshold(0)
                 .withQuarantineSuccessThreshold(0)
                 .withDownNodeProbePeriodMs(0)
-                .withQuarantineTrafficInterval(0)
+                .withQuarantinedNodeSamplingInterval(0)
                 .withServerRequestTimeoutThresholdMs(0)
                 .disabled()
                 .build();
@@ -228,7 +228,7 @@ namespace ScyllaDB.Alternator
             Assert.That(config.getNodeHealth().ConsecutiveServerErrorThreshold, Is.EqualTo(1));
             Assert.That(config.getNodeHealth().QuarantineSuccessThreshold, Is.EqualTo(1));
             Assert.That(config.getNodeHealth().DownNodeProbePeriodMs, Is.EqualTo(1));
-            Assert.That(config.getNodeHealth().QuarantineTrafficInterval, Is.EqualTo(1));
+            Assert.That(config.getNodeHealth().QuarantinedNodeSamplingInterval, Is.EqualTo(1));
             Assert.That(config.getNodeHealth().ServerRequestTimeoutThresholdMs, Is.EqualTo(0));
             Assert.That(config.getNodeHealth().Disabled, Is.True);
         }

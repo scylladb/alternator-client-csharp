@@ -134,9 +134,9 @@ client builder:
 
 ```csharp
 var nodeHealth = NodeHealthStoreConfig.builder()
-    .withConsecutiveServerErrorThreshold(3)
-    .withQuarantineSuccessThreshold(3)
-    .withQuarantineTrafficInterval(10)
+    .withConsecutiveServerErrorThreshold(10)
+    .withQuarantineSuccessThreshold(10)
+    .withQuarantinedNodeSamplingInterval(10)
     .withDownNodeProbePeriodMs(30000)
     .withServerRequestTimeoutThresholdMs(9000)
     .build();

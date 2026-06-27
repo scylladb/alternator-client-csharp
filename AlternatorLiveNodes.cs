@@ -939,7 +939,7 @@ namespace ScyllaDB.Alternator
             if (!activeNodesEmpty)
             {
                 var trafficSequence = Interlocked.Increment(ref this.nextQuarantineTrafficSequence);
-                if (Mod(trafficSequence, this.config.NodeHealth.QuarantineTrafficInterval) != 0)
+                if (Mod(trafficSequence, this.config.NodeHealth.QuarantinedNodeSamplingInterval) != 0)
                 {
                     return null;
                 }

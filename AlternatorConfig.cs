@@ -18,10 +18,10 @@ namespace ScyllaDB.Alternator
         public const long DefaultConnectionAcquisitionTimeoutMs = 10000;
         public const long DefaultConnectionTimeoutMs = 15000;
         public const long DefaultHttpClientTimeoutMs = DefaultConnectionTimeoutMs;
-        public const int DefaultConsecutiveServerErrorThreshold = 3;
-        public const int DefaultQuarantineSuccessThreshold = 3;
+        public const int DefaultConsecutiveServerErrorThreshold = 10;
+        public const int DefaultQuarantineSuccessThreshold = 10;
         public const long DefaultDownNodeProbePeriodMs = 30000;
-        public const int DefaultQuarantineTrafficInterval = 10;
+        public const int DefaultQuarantinedNodeSamplingInterval = 10;
         public const long DefaultServerRequestTimeoutThresholdMs = 9000;
         public const int RecommendedPartitionKeyDiscoveryMaxRetries = 3;
         public const long RecommendedPartitionKeyDiscoveryInitialDelayMs = 100;
@@ -41,7 +41,7 @@ namespace ScyllaDB.Alternator
         public const int DEFAULT_CONSECUTIVE_SERVER_ERROR_THRESHOLD = DefaultConsecutiveServerErrorThreshold;
         public const int DEFAULT_QUARANTINE_SUCCESS_THRESHOLD = DefaultQuarantineSuccessThreshold;
         public const long DEFAULT_DOWN_NODE_PROBE_PERIOD_MS = DefaultDownNodeProbePeriodMs;
-        public const int DEFAULT_QUARANTINE_TRAFFIC_INTERVAL = DefaultQuarantineTrafficInterval;
+        public const int DEFAULT_QUARANTINED_NODE_SAMPLING_INTERVAL = DefaultQuarantinedNodeSamplingInterval;
         public const long DEFAULT_SERVER_REQUEST_TIMEOUT_THRESHOLD_MS = DefaultServerRequestTimeoutThresholdMs;
         public const int RECOMMENDED_PARTITION_KEY_DISCOVERY_MAX_RETRIES = RecommendedPartitionKeyDiscoveryMaxRetries;
         public const long RECOMMENDED_PARTITION_KEY_DISCOVERY_INITIAL_DELAY_MS = RecommendedPartitionKeyDiscoveryInitialDelayMs;

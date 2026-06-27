@@ -9,7 +9,7 @@ namespace ScyllaDB.Alternator
         private int consecutiveServerErrorThreshold = AlternatorConfig.DefaultConsecutiveServerErrorThreshold;
         private int quarantineSuccessThreshold = AlternatorConfig.DefaultQuarantineSuccessThreshold;
         private long downNodeProbePeriodMs = AlternatorConfig.DefaultDownNodeProbePeriodMs;
-        private int quarantineTrafficInterval = AlternatorConfig.DefaultQuarantineTrafficInterval;
+        private int quarantinedNodeSamplingInterval = AlternatorConfig.DefaultQuarantinedNodeSamplingInterval;
         private long serverRequestTimeoutThresholdMs = AlternatorConfig.DefaultServerRequestTimeoutThresholdMs;
         private bool isDisabled;
 
@@ -31,9 +31,9 @@ namespace ScyllaDB.Alternator
             return this;
         }
 
-        public NodeHealthStoreConfigBuilder WithQuarantineTrafficInterval(int interval)
+        public NodeHealthStoreConfigBuilder WithQuarantinedNodeSamplingInterval(int interval)
         {
-            this.quarantineTrafficInterval = interval;
+            this.quarantinedNodeSamplingInterval = interval;
             return this;
         }
 
@@ -61,7 +61,7 @@ namespace ScyllaDB.Alternator
                 ConsecutiveServerErrorThreshold = this.consecutiveServerErrorThreshold,
                 QuarantineSuccessThreshold = this.quarantineSuccessThreshold,
                 DownNodeProbePeriodMs = this.downNodeProbePeriodMs,
-                QuarantineTrafficInterval = this.quarantineTrafficInterval,
+                QuarantinedNodeSamplingInterval = this.quarantinedNodeSamplingInterval,
                 ServerRequestTimeoutThresholdMs = this.serverRequestTimeoutThresholdMs,
                 Disabled = this.isDisabled,
             });
@@ -83,9 +83,9 @@ namespace ScyllaDB.Alternator
             return this.WithDownNodeProbePeriodMs(periodMs);
         }
 
-        public NodeHealthStoreConfigBuilder withQuarantineTrafficInterval(int interval)
+        public NodeHealthStoreConfigBuilder withQuarantinedNodeSamplingInterval(int interval)
         {
-            return this.WithQuarantineTrafficInterval(interval);
+            return this.WithQuarantinedNodeSamplingInterval(interval);
         }
 
         public NodeHealthStoreConfigBuilder withServerRequestTimeoutThresholdMs(long thresholdMs)
