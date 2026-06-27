@@ -298,16 +298,20 @@ namespace ScyllaDB.Alternator
             var emptyContent = CreateDefaultRequest(Array.Empty<byte>());
             var bodyless = CreateDefaultRequest();
             var alreadyCompressed = CreateDefaultRequest(new byte[10]);
+            var alreadyCompressedCaseInsensitive = CreateDefaultRequest(new byte[10]);
             alreadyCompressed.Headers["Content-Encoding"] = "br, gzip";
+            alreadyCompressedCaseInsensitive.Headers["Content-Encoding"] = "GZip";
 
             Assert.DoesNotThrow(() => InvokeCompressRequest(zeroThresholdHandler, null));
             InvokeCompressRequest(zeroThresholdHandler, emptyContent);
             InvokeCompressRequest(zeroThresholdHandler, bodyless);
             InvokeCompressRequest(zeroThresholdHandler, alreadyCompressed);
+            InvokeCompressRequest(zeroThresholdHandler, alreadyCompressedCaseInsensitive);
 
             Assert.That(emptyContent.CompressionAlgorithm, Is.EqualTo(CompressionEncodingAlgorithm.gzip));
             Assert.That(bodyless.CompressionAlgorithm, Is.Not.EqualTo(CompressionEncodingAlgorithm.gzip));
             Assert.That(alreadyCompressed.CompressionAlgorithm, Is.Not.EqualTo(CompressionEncodingAlgorithm.gzip));
+            Assert.That(alreadyCompressedCaseInsensitive.CompressionAlgorithm, Is.Not.EqualTo(CompressionEncodingAlgorithm.gzip));
         }
 
         [Test]
@@ -326,6 +330,18 @@ namespace ScyllaDB.Alternator
 
             Assert.That(belowThreshold.CompressionAlgorithm, Is.Not.EqualTo(CompressionEncodingAlgorithm.gzip));
             Assert.That(atThreshold.CompressionAlgorithm, Is.EqualTo(CompressionEncodingAlgorithm.gzip));
+        }
+
+        [Test]
+        public void GzipRequestPipelineHandlerCompressesUnseekableStreamsTest()
+        {
+            var handler = new GzipRequestPipelineHandler(1024);
+            using var stream = new UnseekableMemoryStream(new byte[8]);
+            var request = CreateDefaultRequest(contentStream: stream);
+
+            InvokeCompressRequest(handler, request);
+
+            Assert.That(request.CompressionAlgorithm, Is.EqualTo(CompressionEncodingAlgorithm.gzip));
         }
 
         private static (string DirectoryPath, string CertificatePath, string PrivateKeyPath) CreateTemporaryClientCertificateFiles()
@@ -503,6 +519,16 @@ namespace ScyllaDB.Alternator
             Assert.That(method, Is.Not.Null);
             return (request, headers, transformer, appendDefaultToken) =>
                 method!.Invoke(null, new object?[] { request, headers, transformer, appendDefaultToken });
+        }
+
+        private sealed class UnseekableMemoryStream : MemoryStream
+        {
+            internal UnseekableMemoryStream(byte[] buffer)
+                : base(buffer)
+            {
+            }
+
+            public override bool CanSeek => false;
         }
 
         private sealed class CapturingHttpMessageHandler : HttpMessageHandler

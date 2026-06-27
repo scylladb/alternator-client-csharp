@@ -230,6 +230,13 @@ disable TLS resumption.
 ## Compression and Header Optimization
 
 Request compression is installed in the AWS SDK runtime pipeline before request signing.
+`RequestCompressionAlgorithm.GZIP` enables gzip request-body compression. `NONE`
+or `null` leaves request bodies uncompressed. `withMinCompressionSizeBytes(...)`
+sets the minimum request body size; bodies at or above the threshold are
+compressed, and bodies below the threshold are sent as-is. For seekable streams,
+the remaining stream length is used. Non-seekable streams are treated as
+compressible because their length cannot be checked without consuming the body.
+Requests that already include `Content-Encoding: gzip` are not recompressed.
 
 ```csharp
 AmazonDynamoDBClient client = AlternatorDynamoDBClient.builder()
