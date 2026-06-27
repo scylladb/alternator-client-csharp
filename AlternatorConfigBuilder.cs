@@ -17,6 +17,9 @@ namespace ScyllaDB.Alternator
         private RoutingScope? routingScope;
         private RequestCompressionAlgorithm compressionAlgorithm = RequestCompressionAlgorithm.None;
         private int minCompressionSizeBytes = AlternatorConfig.DefaultMinCompressionSizeBytes;
+        private IReadOnlyList<ResponseCompressionAlgorithm> responseCompressionAlgorithms =
+            AlternatorConfig.DefaultResponseCompressionAlgorithms;
+
         private bool optimizeHeaders;
         private ISet<string>? headersWhitelist;
         private bool headersWhitelistWasSet;
@@ -120,6 +123,23 @@ namespace ScyllaDB.Alternator
         public AlternatorConfigBuilder WithMinCompressionSizeBytes(int minCompressionSizeBytes)
         {
             this.minCompressionSizeBytes = minCompressionSizeBytes;
+            return this;
+        }
+
+        public AlternatorConfigBuilder WithResponseCompression(params ResponseCompressionAlgorithm[] algorithms)
+        {
+            return this.WithResponseCompression((IEnumerable<ResponseCompressionAlgorithm>)algorithms);
+        }
+
+        public AlternatorConfigBuilder WithResponseCompression(IEnumerable<ResponseCompressionAlgorithm> algorithms)
+        {
+            this.responseCompressionAlgorithms = AlternatorConfig.NormalizeResponseCompressionAlgorithms(algorithms);
+            return this;
+        }
+
+        public AlternatorConfigBuilder WithoutResponseCompression()
+        {
+            this.responseCompressionAlgorithms = Array.Empty<ResponseCompressionAlgorithm>();
             return this;
         }
 
@@ -278,6 +298,21 @@ namespace ScyllaDB.Alternator
             return this.WithMinCompressionSizeBytes(minCompressionSizeBytes);
         }
 
+        public AlternatorConfigBuilder withResponseCompression(params ResponseCompressionAlgorithm[] algorithms)
+        {
+            return this.WithResponseCompression(algorithms);
+        }
+
+        public AlternatorConfigBuilder withResponseCompression(IEnumerable<ResponseCompressionAlgorithm> algorithms)
+        {
+            return this.WithResponseCompression(algorithms);
+        }
+
+        public AlternatorConfigBuilder withoutResponseCompression()
+        {
+            return this.WithoutResponseCompression();
+        }
+
         public AlternatorConfigBuilder withOptimizeHeaders(bool optimizeHeaders)
         {
             return this.WithOptimizeHeaders(optimizeHeaders);
@@ -418,6 +453,7 @@ namespace ScyllaDB.Alternator
                 this.routingScope ?? ClusterScope.Create(),
                 this.compressionAlgorithm,
                 this.minCompressionSizeBytes,
+                this.responseCompressionAlgorithms,
                 this.optimizeHeaders,
                 this.headersWhitelist,
                 this.headersWhitelistWasSet,

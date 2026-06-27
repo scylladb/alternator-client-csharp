@@ -247,6 +247,27 @@ AmazonDynamoDBClient client = AlternatorDynamoDBClient.builder()
     .build();
 ```
 
+Response compression is enabled by default for `gzip` and `deflate`. The client
+sends `Accept-Encoding: gzip, deflate` when no request header is already set, and
+decodes supported compressed response bodies before the AWS SDK reads them.
+Unsupported response encodings are left unchanged.
+
+```csharp
+AmazonDynamoDBClient client = AlternatorDynamoDBClient.builder()
+    .endpointOverride("http://127.0.0.1:8000")
+    .credentialsProvider(credentials)
+    .withResponseCompression(ResponseCompressionAlgorithm.GZIP)
+    .build();
+```
+
+```csharp
+AmazonDynamoDBClient client = AlternatorDynamoDBClient.builder()
+    .endpointOverride("http://127.0.0.1:8000")
+    .credentialsProvider(credentials)
+    .withoutResponseCompression()
+    .build();
+```
+
 Header optimization filters outgoing HTTP headers to an allow-list. If no
 allow-list is supplied, the client computes one from the effective Alternator
 configuration. The computed list keeps the required transport headers and adds

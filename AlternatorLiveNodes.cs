@@ -479,6 +479,7 @@ namespace ScyllaDB.Alternator
                 .WithRoutingScope(config.RoutingScope)
                 .WithCompressionAlgorithm(config.CompressionAlgorithm)
                 .WithMinCompressionSizeBytes(config.MinCompressionSizeBytes)
+                .WithResponseCompression(config.ResponseCompressionAlgorithms)
                 .WithOptimizeHeaders(config.OptimizeHeaders)
                 .WithUserAgentEnabled(config.UserAgentEnabled)
                 .WithAuthenticationEnabled(config.AuthenticationEnabled)

@@ -97,5 +97,33 @@ namespace ScyllaDB.Alternator
             Assert.That(wrapper.Config.OptimizeHeaders, Is.True);
             Assert.That(wrapper.Config.HeadersWhitelist, Does.Contain("X-Helper-Trace"));
         }
+
+        [Test]
+        [Category("Unit")]
+        public void HelperOptionsBuilderSupportsResponseCompressionConfigurationTest()
+        {
+            var options = HelperOptionsBuilder.Create()
+                .WithInitialNodeUri(new Uri("http://127.0.0.1:8080"))
+                .WithResponseCompression(ResponseCompressionAlgorithm.GZIP)
+                .WithoutValidation()
+                .WithDeferredStart()
+                .Build();
+            var disabledOptions = HelperOptionsBuilder.Create()
+                .WithInitialNodeUri(new Uri("http://127.0.0.1:8081"))
+                .WithoutResponseCompression()
+                .WithoutValidation()
+                .WithDeferredStart()
+                .Build();
+
+            using var wrapper = AlternatorDynamoDBClient.builder()
+                .WithOptions(options)
+                .buildWithAlternatorAPI();
+            using var disabledWrapper = AlternatorDynamoDBClient.builder()
+                .WithOptions(disabledOptions)
+                .buildWithAlternatorAPI();
+
+            Assert.That(wrapper.Config.ResponseCompressionAlgorithms, Is.EqualTo(new[] { ResponseCompressionAlgorithm.Gzip }));
+            Assert.That(disabledWrapper.Config.ResponseCompressionAlgorithms, Is.Empty);
+        }
     }
 }

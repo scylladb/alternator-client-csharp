@@ -69,6 +69,9 @@ namespace ScyllaDB.Alternator
 
         public int MinCompressionSizeBytes { get; set; } = AlternatorConfig.DefaultMinCompressionSizeBytes;
 
+        public IReadOnlyList<ResponseCompressionAlgorithm> ResponseCompressionAlgorithms { get; set; } =
+            AlternatorConfig.DefaultResponseCompressionAlgorithms;
+
         public bool OptimizeHeaders { get; set; }
 
         public ISet<string>? HeadersWhitelist { get; set; }
@@ -87,6 +90,7 @@ namespace ScyllaDB.Alternator
                 .WithPort(this.Port)
                 .WithCompressionAlgorithm(this.CompressionAlgorithm)
                 .WithMinCompressionSizeBytes(this.MinCompressionSizeBytes)
+                .WithResponseCompression(this.ResponseCompressionAlgorithms)
                 .WithOptimizeHeaders(this.OptimizeHeaders)
                 .WithAuthenticationEnabled(this.AuthenticationEnabled)
                 .WithKeyRouteAffinity(this.KeyRouteAffinityConfig)

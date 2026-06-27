@@ -201,5 +201,35 @@ namespace ScyllaDB.Alternator
                 .build());
             Assert.That(nullHeaders!.Message, Does.Contain("Custom header optimizer cannot return null"));
         }
+
+        [Test]
+        public void AlternatorConfigBuilderConfiguresResponseCompressionTest()
+        {
+            var defaultConfig = AlternatorConfig.builder().build();
+            Assert.That(
+                defaultConfig.getResponseCompressionAlgorithms(),
+                Is.EqualTo(new[] { ResponseCompressionAlgorithm.Gzip, ResponseCompressionAlgorithm.Deflate }));
+
+            var deflateOnly = AlternatorConfig.builder()
+                .withResponseCompression(ResponseCompressionAlgorithm.DEFLATE)
+                .build();
+            Assert.That(deflateOnly.ResponseCompressionAlgorithms, Is.EqualTo(new[] { ResponseCompressionAlgorithm.Deflate }));
+
+            var deduplicated = AlternatorConfig.builder()
+                .withResponseCompression(ResponseCompressionAlgorithm.GZIP, ResponseCompressionAlgorithm.Gzip)
+                .build();
+            Assert.That(deduplicated.ResponseCompressionAlgorithms, Is.EqualTo(new[] { ResponseCompressionAlgorithm.Gzip }));
+
+            var disabled = AlternatorConfig.builder()
+                .withoutResponseCompression()
+                .build();
+            Assert.That(disabled.ResponseCompressionAlgorithms, Is.Empty);
+
+            Assert.Throws<ArgumentNullException>(() => AlternatorConfig.builder()
+                .withResponseCompression((IEnumerable<ResponseCompressionAlgorithm>)null!));
+            Assert.Throws<ArgumentException>(() => AlternatorConfig.builder()
+                .withResponseCompression((ResponseCompressionAlgorithm)999)
+                .build());
+        }
     }
 }
