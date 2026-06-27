@@ -4,11 +4,17 @@
 
 namespace ScyllaDB.Alternator
 {
+    using System.Net.Security;
+    using System.Security.Cryptography.X509Certificates;
+
     public sealed class TlsConfigBuilder
     {
         private List<string> customCaCertPaths = new List<string>();
+        private List<X509Certificate2> customCaCertificates = new List<X509Certificate2>();
         private string? clientCertificatePath;
         private string? clientPrivateKeyPath;
+        private List<X509Certificate2> clientCertificates = new List<X509Certificate2>();
+        private RemoteCertificateValidationCallback? certificateValidationCallback;
         private bool trustSystemCaCerts = true;
         private bool trustAllCertificates;
         private bool verifyHostname = true;
@@ -42,6 +48,34 @@ namespace ScyllaDB.Alternator
             return this;
         }
 
+        public TlsConfigBuilder WithCaCertificate(X509Certificate2? certificate)
+        {
+            if (certificate == null)
+            {
+                throw new ArgumentException("CA certificate cannot be null", nameof(certificate));
+            }
+
+            this.customCaCertificates.Add(certificate);
+            return this;
+        }
+
+        public TlsConfigBuilder WithCaCertificates(IEnumerable<X509Certificate2>? certificates)
+        {
+            if (certificates == null)
+            {
+                this.customCaCertificates = new List<X509Certificate2>();
+                return this;
+            }
+
+            this.customCaCertificates = new List<X509Certificate2>();
+            foreach (var certificate in certificates)
+            {
+                this.WithCaCertificate(certificate);
+            }
+
+            return this;
+        }
+
         public TlsConfigBuilder WithClientCertificate(string? certificatePath, string? privateKeyPath)
         {
             if (certificatePath == null)
@@ -56,6 +90,45 @@ namespace ScyllaDB.Alternator
 
             this.clientCertificatePath = certificatePath;
             this.clientPrivateKeyPath = privateKeyPath;
+            return this;
+        }
+
+        public TlsConfigBuilder WithClientCertificate(X509Certificate2? certificate)
+        {
+            if (certificate == null)
+            {
+                throw new ArgumentException("Client certificate cannot be null", nameof(certificate));
+            }
+
+            if (!certificate.HasPrivateKey)
+            {
+                throw new ArgumentException("Client certificate must include a private key", nameof(certificate));
+            }
+
+            this.clientCertificates.Add(certificate);
+            return this;
+        }
+
+        public TlsConfigBuilder WithClientCertificates(IEnumerable<X509Certificate2>? certificates)
+        {
+            if (certificates == null)
+            {
+                this.clientCertificates = new List<X509Certificate2>();
+                return this;
+            }
+
+            this.clientCertificates = new List<X509Certificate2>();
+            foreach (var certificate in certificates)
+            {
+                this.WithClientCertificate(certificate);
+            }
+
+            return this;
+        }
+
+        public TlsConfigBuilder WithCertificateValidationCallback(RemoteCertificateValidationCallback? callback)
+        {
+            this.certificateValidationCallback = callback;
             return this;
         }
 
@@ -85,7 +158,11 @@ namespace ScyllaDB.Alternator
 
         public TlsConfig Build()
         {
-            if (!this.trustAllCertificates && !this.trustSystemCaCerts && this.customCaCertPaths.Count == 0)
+            if (!this.trustAllCertificates
+                && !this.trustSystemCaCerts
+                && this.customCaCertPaths.Count == 0
+                && this.customCaCertificates.Count == 0
+                && this.certificateValidationCallback == null)
             {
                 throw new InvalidOperationException(
                     "Invalid TLS configuration: no trust source configured. Either enable trustSystemCaCerts, add custom CA certificates, or enable trustAllCertificates (for development only).");
@@ -93,8 +170,11 @@ namespace ScyllaDB.Alternator
 
             return new TlsConfig(
                 this.customCaCertPaths.AsReadOnly(),
+                this.customCaCertificates.AsReadOnly(),
                 this.clientCertificatePath,
                 this.clientPrivateKeyPath,
+                this.clientCertificates.AsReadOnly(),
+                this.certificateValidationCallback,
                 this.trustSystemCaCerts,
                 this.trustAllCertificates,
                 this.trustAllCertificates ? false : this.verifyHostname,
@@ -112,9 +192,34 @@ namespace ScyllaDB.Alternator
             return this.WithCaCertPaths(paths);
         }
 
+        public TlsConfigBuilder withCaCertificate(X509Certificate2? certificate)
+        {
+            return this.WithCaCertificate(certificate);
+        }
+
+        public TlsConfigBuilder withCaCertificates(IEnumerable<X509Certificate2>? certificates)
+        {
+            return this.WithCaCertificates(certificates);
+        }
+
         public TlsConfigBuilder withClientCertificate(string? certificatePath, string? privateKeyPath)
         {
             return this.WithClientCertificate(certificatePath, privateKeyPath);
+        }
+
+        public TlsConfigBuilder withClientCertificate(X509Certificate2? certificate)
+        {
+            return this.WithClientCertificate(certificate);
+        }
+
+        public TlsConfigBuilder withClientCertificates(IEnumerable<X509Certificate2>? certificates)
+        {
+            return this.WithClientCertificates(certificates);
+        }
+
+        public TlsConfigBuilder withCertificateValidationCallback(RemoteCertificateValidationCallback? callback)
+        {
+            return this.WithCertificateValidationCallback(callback);
         }
 
         public TlsConfigBuilder withTrustSystemCaCerts(bool trustSystemCaCerts)
