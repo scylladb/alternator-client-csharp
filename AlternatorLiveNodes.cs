@@ -259,6 +259,16 @@ namespace ScyllaDB.Alternator
             }
         }
 
+        public IReadOnlyList<Uri> GetActiveNodes()
+        {
+            return this.GetActiveNodesInternal().ToList().AsReadOnly();
+        }
+
+        public IReadOnlyList<Uri> GetQuarantinedNodes()
+        {
+            return this.GetQuarantinedNodesInternal().ToList().AsReadOnly();
+        }
+
         public Uri NextAsUri(string? path, string? query)
         {
             Uri uri = this.NextAsUri();
@@ -409,6 +419,16 @@ namespace ScyllaDB.Alternator
         {
             return this.GetLiveNodes();
         }
+
+        public IReadOnlyList<Uri> getActiveNodes()
+        {
+            return this.GetActiveNodes();
+        }
+
+        public IReadOnlyList<Uri> getQuarantinedNodes()
+        {
+            return this.GetQuarantinedNodes();
+        }
 #pragma warning restore SA1300, IDE1006
 
         internal Uri GetNodeForHash(long hash)
@@ -455,10 +475,30 @@ namespace ScyllaDB.Alternator
             }
         }
 
+        protected internal virtual IReadOnlyList<Uri> GetActiveNodesInternal()
+        {
+            return this.GetLiveNodesInternal();
+        }
+
+        protected internal virtual IReadOnlyList<Uri> GetQuarantinedNodesInternal()
+        {
+            return Array.Empty<Uri>();
+        }
+
 #pragma warning disable SA1300, IDE1006
         protected internal virtual IReadOnlyList<Uri> getLiveNodesInternal()
         {
             return this.GetLiveNodesInternal();
+        }
+
+        protected internal virtual IReadOnlyList<Uri> getActiveNodesInternal()
+        {
+            return this.GetActiveNodesInternal();
+        }
+
+        protected internal virtual IReadOnlyList<Uri> getQuarantinedNodesInternal()
+        {
+            return this.GetQuarantinedNodesInternal();
         }
 #pragma warning restore SA1300, IDE1006
 

@@ -12,6 +12,7 @@ namespace ScyllaDB.Alternator.KeyRouting
         private readonly List<Uri>? preferredNodes;
         private readonly HashSet<Uri> usedNodes = new HashSet<Uri>();
         private List<Uri>? remaining;
+        private List<Uri>? fallbackRemaining;
         private bool initialized;
         private Uri? nextNode;
 
@@ -65,7 +66,7 @@ namespace ScyllaDB.Alternator.KeyRouting
                 if (this.random != null || this.preferredNodes != null || this.fixedNodes != null)
                 {
                     this.EnsureInitialized();
-                    return this.remaining!.Count != 0;
+                    return this.HasRemainingInitializedNodes();
                 }
 
                 return this.ComputeNextNonSeeded() != null;
@@ -74,7 +75,7 @@ namespace ScyllaDB.Alternator.KeyRouting
 
         public static List<Uri> SortedAffinityNodes(AlternatorLiveNodes liveNodes)
         {
-            var nodes = GetLiveNodes(liveNodes);
+            var nodes = GetPrimaryNodes(liveNodes);
             SortAffinityNodes(nodes);
             return nodes;
         }
@@ -109,7 +110,15 @@ namespace ScyllaDB.Alternator.KeyRouting
                 this.EnsureInitialized();
                 if (this.remaining!.Count == 0)
                 {
-                    throw new InvalidOperationException("No more nodes available in query plan");
+                    if (this.fallbackRemaining?.Count > 0)
+                    {
+                        this.remaining = this.fallbackRemaining;
+                        this.fallbackRemaining = null;
+                    }
+                    else
+                    {
+                        throw new InvalidOperationException("No more nodes available in query plan");
+                    }
                 }
 
                 var index = this.random.Intn(this.remaining.Count);
@@ -125,7 +134,15 @@ namespace ScyllaDB.Alternator.KeyRouting
                 this.EnsureInitialized();
                 if (this.remaining!.Count == 0)
                 {
-                    throw new InvalidOperationException("No more nodes available in query plan");
+                    if (this.fallbackRemaining?.Count > 0)
+                    {
+                        this.remaining = this.fallbackRemaining;
+                        this.fallbackRemaining = null;
+                    }
+                    else
+                    {
+                        throw new InvalidOperationException("No more nodes available in query plan");
+                    }
                 }
 
                 var node = this.remaining[0];
@@ -174,14 +191,29 @@ namespace ScyllaDB.Alternator.KeyRouting
         }
 #pragma warning restore SA1300, IDE1006
 
-        private static List<Uri> GetLiveNodes(AlternatorLiveNodes liveNodes)
+        private static List<Uri> GetPrimaryNodes(AlternatorLiveNodes liveNodes)
         {
             if (liveNodes == null)
             {
                 throw new ArgumentException("liveNodes cannot be null", nameof(liveNodes));
             }
 
-            return liveNodes.GetLiveNodesInternal().ToList();
+            var activeNodes = liveNodes.GetActiveNodesInternal().ToList();
+            return activeNodes.Count != 0
+                ? activeNodes
+                : liveNodes.GetQuarantinedNodesInternal().ToList();
+        }
+
+        private static List<Uri> GetFallbackNodes(AlternatorLiveNodes liveNodes)
+        {
+            if (liveNodes == null)
+            {
+                throw new ArgumentException("liveNodes cannot be null", nameof(liveNodes));
+            }
+
+            return liveNodes.GetActiveNodesInternal().Count != 0
+                ? liveNodes.GetQuarantinedNodesInternal().ToList()
+                : new List<Uri>();
         }
 
         private static void SortAffinityNodes(List<Uri> nodes)
@@ -226,14 +258,23 @@ namespace ScyllaDB.Alternator.KeyRouting
             }
             else
             {
-                this.remaining = SortedAffinityNodes(this.liveNodes!);
+                this.remaining = GetPrimaryNodes(this.liveNodes!);
+                this.fallbackRemaining = GetFallbackNodes(this.liveNodes!);
+                SortAffinityNodes(this.remaining);
+                SortAffinityNodes(this.fallbackRemaining);
                 if (this.preferredNodes != null)
                 {
                     this.remaining = OrderPreferredNodesFirst(this.remaining, this.preferredNodes);
+                    this.fallbackRemaining = OrderPreferredNodesFirst(this.fallbackRemaining, this.preferredNodes);
                 }
             }
 
             this.initialized = true;
+        }
+
+        private bool HasRemainingInitializedNodes()
+        {
+            return this.remaining!.Count != 0 || this.fallbackRemaining?.Count > 0;
         }
 
         private Uri? ComputeNextNonSeeded()
@@ -255,9 +296,16 @@ namespace ScyllaDB.Alternator.KeyRouting
                 return this.nextNode;
             }
 
-            var availableNodes = this.liveNodes.GetLiveNodesInternal()
+            var availableNodes = this.liveNodes.GetActiveNodesInternal()
                 .Where(node => !this.usedNodes.Contains(node))
                 .ToList();
+            if (availableNodes.Count == 0)
+            {
+                availableNodes = this.liveNodes.GetQuarantinedNodesInternal()
+                    .Where(node => !this.usedNodes.Contains(node))
+                    .ToList();
+            }
+
             if (availableNodes.Count == 0)
             {
                 return null;

@@ -695,6 +695,64 @@ namespace ScyllaDB.Alternator
                 Is.EqualTo(LazyQueryPlan.preferredNodeForHash(sortedLiveNodes, 42L)));
         }
 
+        [Test]
+        public void LazyQueryPlanUsesActiveNodesBeforeQuarantinedFallbackTest()
+        {
+            var activeNodes = Uris("node4", "node2");
+            var quarantinedNodes = Uris("node3", "node1");
+            var liveNodes = new HealthSplitLiveNodes(activeNodes, quarantinedNodes);
+            var plan = new LazyQueryPlan(liveNodes, 42L);
+
+            var activePlanNodes = DrainQueryPlanUris(plan, activeNodes.Count);
+            var fallbackPlanNodes = DrainQueryPlanUris(plan, quarantinedNodes.Count);
+            var preferredNode = LazyQueryPlan.preferredNodeForHash(liveNodes, 42L);
+
+            Assert.That(liveNodes.getActiveNodes(), Is.EqualTo(activeNodes));
+            Assert.That(liveNodes.getQuarantinedNodes(), Is.EqualTo(quarantinedNodes));
+            Assert.That(LazyQueryPlan.sortedAffinityNodes(liveNodes), Is.EqualTo(SortUris(activeNodes)));
+            Assert.That(activeNodes, Does.Contain(preferredNode));
+            Assert.That(activePlanNodes, Is.EquivalentTo(activeNodes));
+            Assert.That(fallbackPlanNodes, Is.EquivalentTo(quarantinedNodes));
+            Assert.That(plan.hasNext(), Is.False);
+        }
+
+        [Test]
+        public void LazyQueryPlanUsesQuarantinedNodesWhenNoActiveNodesTest()
+        {
+            var quarantinedNodes = Uris("node3", "node1", "node2");
+            var liveNodes = new HealthSplitLiveNodes(Array.Empty<Uri>(), quarantinedNodes);
+            var plan = new LazyQueryPlan(liveNodes, 42L);
+
+            var planNodes = DrainQueryPlanUris(plan, quarantinedNodes.Count);
+
+            Assert.That(LazyQueryPlan.sortedAffinityNodes(liveNodes), Is.EqualTo(SortUris(quarantinedNodes)));
+            Assert.That(planNodes, Is.EquivalentTo(quarantinedNodes));
+            Assert.That(plan.hasNext(), Is.False);
+        }
+
+        [Test]
+        public void AffinityBatchWriteVotingUsesActiveNodesBeforeQuarantinedFallbackTest()
+        {
+            var activeNodes = Uris("node2");
+            var quarantinedNodes = Uris("node1", "node3");
+            var liveNodes = new HealthSplitLiveNodes(activeNodes, quarantinedNodes);
+            var affinity = BatchWriteAffinityConfig(PkInfo("orders", "id"));
+            var interceptor = new AffinityQueryPlanInterceptor(affinity, liveNodes);
+            var request = BatchWrite(
+                Table(
+                    "orders",
+                    Put(ItemWithId("order-1", "payload-a")),
+                    Delete(KeyWithId("order-2")),
+                    Put(ItemWithId("order-3", "payload-b"))));
+
+            var queryPlan = InvokeTryCreateBatchWriteAffinityQueryPlan(interceptor, request);
+            Assert.That(queryPlan, Is.Not.Null);
+            var planNodes = DrainQueryPlanUris(queryPlan!, activeNodes.Count + quarantinedNodes.Count);
+
+            Assert.That(planNodes.Take(activeNodes.Count), Is.EqualTo(activeNodes));
+            Assert.That(planNodes.Skip(activeNodes.Count), Is.EquivalentTo(quarantinedNodes));
+        }
+
         private static Helper CreateHelperForNodes(params string[] hosts)
         {
             var config = AlternatorConfig.builder()
@@ -791,7 +849,7 @@ namespace ScyllaDB.Alternator
         }
 
         private static object? InvokeTryCreateBatchWriteAffinityQueryPlan(
-            QueryPlanPipelineHandler handler,
+            AffinityQueryPlanInterceptor handler,
             BatchWriteItemRequest request)
         {
             var method = typeof(AffinityQueryPlanInterceptor).GetMethod(
@@ -802,6 +860,18 @@ namespace ScyllaDB.Alternator
                 null);
             Assert.That(method, Is.Not.Null);
             return method!.Invoke(handler, new object[] { request });
+        }
+
+        private static List<Uri> Uris(params string[] hosts)
+        {
+            return hosts.Select(host => new Uri($"http://{host}.example.com:8043")).ToList();
+        }
+
+        private static List<Uri> SortUris(IEnumerable<Uri> uris)
+        {
+            var sorted = uris.ToList();
+            sorted.Sort((left, right) => string.Compare(left.ToString(), right.ToString(), StringComparison.Ordinal));
+            return sorted;
         }
 
         private static Uri NodeForPartitionKeyValue(Helper helper, AttributeValue value)
@@ -974,6 +1044,40 @@ namespace ScyllaDB.Alternator
             {
                 cancellation.Token.ThrowIfCancellationRequested();
                 await Task.Delay(20, cancellation.Token);
+            }
+        }
+
+        private sealed class HealthSplitLiveNodes : AlternatorLiveNodes
+        {
+            private readonly IReadOnlyList<Uri> activeNodes;
+            private readonly IReadOnlyList<Uri> quarantinedNodes;
+
+            internal HealthSplitLiveNodes(IEnumerable<Uri> activeNodes, IEnumerable<Uri> quarantinedNodes)
+                : base(BuildSeedNodes(activeNodes, quarantinedNodes), "http", 8043, string.Empty, string.Empty)
+            {
+                this.activeNodes = activeNodes.ToList().AsReadOnly();
+                this.quarantinedNodes = quarantinedNodes.ToList().AsReadOnly();
+            }
+
+            protected override IReadOnlyList<Uri> GetActiveNodesInternal()
+            {
+                return this.activeNodes;
+            }
+
+            protected override IReadOnlyList<Uri> GetQuarantinedNodesInternal()
+            {
+                return this.quarantinedNodes;
+            }
+
+            private static List<Uri> BuildSeedNodes(IEnumerable<Uri> activeNodes, IEnumerable<Uri> quarantinedNodes)
+            {
+                var seedNodes = activeNodes.Concat(quarantinedNodes).ToList();
+                if (seedNodes.Count == 0)
+                {
+                    seedNodes.Add(new Uri("http://seed.example.com:8043"));
+                }
+
+                return seedNodes;
             }
         }
     }
