@@ -429,6 +429,13 @@ namespace ScyllaDB.Alternator
             return this;
         }
 
+        public AlternatorDynamoDBClientBuilder WithNodeHealth(NodeHealthStoreConfig? config)
+        {
+            this.optionsBuilder.WithNodeHealth(config);
+            this.configBuilder.WithNodeHealth(config);
+            return this;
+        }
+
         public AlternatorDynamoDBClientBuilder WithDisableCertificateChecks()
         {
             this.disableCertificateChecks = true;
@@ -795,6 +802,11 @@ namespace ScyllaDB.Alternator
             return this.WithHttpClientTimeoutMs(httpClientTimeoutMs);
         }
 
+        public AlternatorDynamoDBClientBuilder withNodeHealth(NodeHealthStoreConfig? config)
+        {
+            return this.WithNodeHealth(config);
+        }
+
         public AlternatorDynamoDBClientBuilder withDisableCertificateChecks()
         {
             return this.WithDisableCertificateChecks();
@@ -928,7 +940,8 @@ namespace ScyllaDB.Alternator
                 .WithConnectionTimeToLiveMs(config.ConnectionTimeToLiveMs)
                 .WithConnectionAcquisitionTimeoutMs(config.ConnectionAcquisitionTimeoutMs)
                 .WithConnectionTimeoutMs(config.ConnectionTimeoutMs)
-                .WithHttpClientTimeoutMs(config.HttpClientTimeoutMs);
+                .WithHttpClientTimeoutMs(config.HttpClientTimeoutMs)
+                .WithNodeHealth(config.NodeHealth);
 
             config.CopyHeaderOptimizationTo(builder);
             return builder.Build();
@@ -991,6 +1004,7 @@ namespace ScyllaDB.Alternator
             dynamoDbConfig.MaxConnectionsPerServer = alternatorConfig.MaxConnections;
             dynamoDbConfig.HttpClientFactory ??= new AlternatorHttpClientFactory(
                 alternatorConfig,
+                endpointProvider.GetAlternatorLiveNodes(),
                 this.configureHttpClientHandler,
                 this.configureSocketsHttpHandler);
             this.configureAws?.Invoke(dynamoDbConfig);
@@ -1143,7 +1157,8 @@ namespace ScyllaDB.Alternator
                 .WithConnectionTimeToLiveMs(config.ConnectionTimeToLiveMs)
                 .WithConnectionAcquisitionTimeoutMs(config.ConnectionAcquisitionTimeoutMs)
                 .WithConnectionTimeoutMs(config.ConnectionTimeoutMs)
-                .WithHttpClientTimeoutMs(config.HttpClientTimeoutMs);
+                .WithHttpClientTimeoutMs(config.HttpClientTimeoutMs)
+                .WithNodeHealth(config.NodeHealth);
             config.CopyHeaderOptimizationTo(this.configBuilder);
         }
 

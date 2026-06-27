@@ -307,6 +307,12 @@ namespace ScyllaDB.Alternator
             return this;
         }
 
+        public HelperOptionsBuilder WithNodeHealth(NodeHealthStoreConfig? config)
+        {
+            this.options.NodeHealth = NodeHealthStoreConfig.Normalize(config);
+            return this;
+        }
+
         /// <summary>
         /// Sets the initial nodes, schema and port for connecting to ScyllaDB Alternator from provided Uri.
         /// </summary>

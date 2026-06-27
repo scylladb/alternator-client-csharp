@@ -94,6 +94,8 @@ namespace ScyllaDB.Alternator
 
         public KeyRouteAffinityConfig? KeyRouteAffinityConfig { get; set; }
 
+        public NodeHealthStoreConfig NodeHealth { get; set; } = new NodeHealthStoreConfig();
+
         internal AlternatorConfig ToAlternatorConfig()
         {
             var builder = AlternatorConfig.Builder()
@@ -114,7 +116,8 @@ namespace ScyllaDB.Alternator
                 .WithConnectionAcquisitionTimeoutMs(this.ConnectionAcquisitionTimeoutMs)
                 .WithConnectionTimeoutMs(this.ConnectionTimeoutMs)
                 .WithHttpClientTimeoutMs(this.HttpClientTimeoutMs)
-                .WithTlsConfig(this.TlsConfig);
+                .WithTlsConfig(this.TlsConfig)
+                .WithNodeHealth(this.NodeHealth);
 
             if (this.CustomOptimizeHeaders != null)
             {
