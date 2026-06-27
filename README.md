@@ -204,6 +204,28 @@ AmazonDynamoDBClient client = AlternatorDynamoDBClient.builder()
     .build();
 ```
 
+Preloaded certificates can be supplied when certificate material is already
+available in memory:
+
+```csharp
+var tls = TlsConfig.builder()
+    .withCaCertificate(caCertificate)
+    .withClientCertificate(clientCertificate)
+    .withTrustSystemCaCerts(false)
+    .build();
+```
+
+A custom server certificate validation callback can be configured without
+replacing the HTTP client factory:
+
+```csharp
+var tls = TlsConfig.builder()
+    .withTrustSystemCaCerts(false)
+    .withCertificateValidationCallback((sender, certificate, chain, errors) =>
+        errors == SslPolicyErrors.None)
+    .build();
+```
+
 Convenience factories:
 
 ```csharp
@@ -226,6 +248,10 @@ portable session ticket cache size or timeout controls through `HttpClient`.
 Use the default `SocketsHttpHandler` transport for this setting; the legacy
 `withHttpClientHandlerCustomizer(...)` path uses platform defaults and cannot
 disable TLS resumption.
+
+The target .NET `HttpClient` APIs also do not expose a per-client TLS key-log
+writer. Runtime- or platform-level TLS key logging, when available, must be
+configured outside this library.
 
 ## Compression and Header Optimization
 

@@ -82,13 +82,13 @@ namespace ScyllaDB.Alternator
             if (tlsConfig.hasClientCertificate())
             {
                 handler.ClientCertificateOptions = ClientCertificateOption.Manual;
-                handler.ClientCertificates.Add(LoadClientCertificate(tlsConfig));
+                handler.ClientCertificates.AddRange(LoadClientCertificates(tlsConfig));
             }
 
-            if (tlsConfig.TrustAllCertificates || tlsConfig.CustomCaCertPaths.Count > 0 || !tlsConfig.VerifyHostname)
+            if (NeedsCustomCertificateValidation(tlsConfig))
             {
-                handler.ServerCertificateCustomValidationCallback = (_, certificate, chain, sslPolicyErrors) =>
-                    ValidateCertificate(tlsConfig, certificate, chain, sslPolicyErrors);
+                handler.ServerCertificateCustomValidationCallback = (request, certificate, chain, sslPolicyErrors) =>
+                    ValidateCertificate(tlsConfig, request, certificate, chain, sslPolicyErrors);
             }
 
             configureHandler?.Invoke(handler);
@@ -114,16 +114,13 @@ namespace ScyllaDB.Alternator
 
             if (config.TlsConfig.hasClientCertificate())
             {
-                handler.SslOptions.ClientCertificates = new X509CertificateCollection
-                {
-                    LoadClientCertificate(config.TlsConfig),
-                };
+                handler.SslOptions.ClientCertificates = LoadClientCertificates(config.TlsConfig);
             }
 
             if (NeedsCustomCertificateValidation(config.TlsConfig))
             {
-                handler.SslOptions.RemoteCertificateValidationCallback = (_, certificate, chain, sslPolicyErrors) =>
-                    ValidateCertificate(config.TlsConfig, certificate, chain, sslPolicyErrors);
+                handler.SslOptions.RemoteCertificateValidationCallback = (sender, certificate, chain, sslPolicyErrors) =>
+                    ValidateCertificate(config.TlsConfig, sender, certificate, chain, sslPolicyErrors);
             }
 
             configureHandler?.Invoke(handler);
@@ -132,14 +129,29 @@ namespace ScyllaDB.Alternator
 
         private static bool NeedsCustomCertificateValidation(TlsConfig tlsConfig)
         {
-            return tlsConfig.TrustAllCertificates || tlsConfig.CustomCaCertPaths.Count > 0 || !tlsConfig.VerifyHostname;
+            return tlsConfig.CertificateValidationCallback != null
+                || tlsConfig.TrustAllCertificates
+                || tlsConfig.CustomCaCertPaths.Count > 0
+                || tlsConfig.CustomCaCertificates.Count > 0
+                || !tlsConfig.VerifyHostname;
         }
 
-        private static X509Certificate2 LoadClientCertificate(TlsConfig tlsConfig)
+        private static X509CertificateCollection LoadClientCertificates(TlsConfig tlsConfig)
         {
-            return X509Certificate2.CreateFromPemFile(
-                tlsConfig.ClientCertificatePath!,
-                tlsConfig.ClientPrivateKeyPath!);
+            var certificates = new X509CertificateCollection();
+            foreach (var certificate in tlsConfig.ClientCertificates)
+            {
+                certificates.Add(certificate);
+            }
+
+            if (tlsConfig.ClientCertificatePath != null && tlsConfig.ClientPrivateKeyPath != null)
+            {
+                certificates.Add(X509Certificate2.CreateFromPemFile(
+                    tlsConfig.ClientCertificatePath,
+                    tlsConfig.ClientPrivateKeyPath));
+            }
+
+            return certificates;
         }
 
         private static TimeSpan ToTimeout(long timeoutMs)
@@ -155,6 +167,16 @@ namespace ScyllaDB.Alternator
             X509Chain? chain,
             SslPolicyErrors sslPolicyErrors)
         {
+            return ValidateCertificate(tlsConfig, null, certificate, chain, sslPolicyErrors);
+        }
+
+        private static bool ValidateCertificate(
+            TlsConfig tlsConfig,
+            object? sender,
+            X509Certificate? certificate,
+            X509Chain? chain,
+            SslPolicyErrors sslPolicyErrors)
+        {
             var certificate2 = certificate as X509Certificate2;
             X509Certificate2? convertedCertificate = null;
             if (certificate != null && certificate2 == null)
@@ -165,7 +187,7 @@ namespace ScyllaDB.Alternator
 
             try
             {
-                return ValidateCertificate(tlsConfig, certificate2, chain, sslPolicyErrors);
+                return ValidateCertificate(tlsConfig, sender, certificate2, chain, sslPolicyErrors);
             }
             finally
             {
@@ -179,6 +201,21 @@ namespace ScyllaDB.Alternator
             X509Chain? chain,
             SslPolicyErrors sslPolicyErrors)
         {
+            return ValidateCertificate(tlsConfig, null, certificate, chain, sslPolicyErrors);
+        }
+
+        private static bool ValidateCertificate(
+            TlsConfig tlsConfig,
+            object? sender,
+            X509Certificate2? certificate,
+            X509Chain? chain,
+            SslPolicyErrors sslPolicyErrors)
+        {
+            if (tlsConfig.CertificateValidationCallback != null)
+            {
+                return tlsConfig.CertificateValidationCallback(sender ?? tlsConfig, certificate, chain, sslPolicyErrors);
+            }
+
             if (tlsConfig.TrustAllCertificates)
             {
                 return true;
@@ -202,7 +239,7 @@ namespace ScyllaDB.Alternator
                 return false;
             }
 
-            if (certificate == null || tlsConfig.CustomCaCertPaths.Count == 0)
+            if (certificate == null || (tlsConfig.CustomCaCertPaths.Count == 0 && tlsConfig.CustomCaCertificates.Count == 0))
             {
                 return false;
             }
@@ -219,6 +256,11 @@ namespace ScyllaDB.Alternator
             foreach (var certPath in tlsConfig.CustomCaCertPaths)
             {
                 customChain.ChainPolicy.CustomTrustStore.Add(new X509Certificate2(certPath));
+            }
+
+            foreach (var customCaCertificate in tlsConfig.CustomCaCertificates)
+            {
+                customChain.ChainPolicy.CustomTrustStore.Add(customCaCertificate);
             }
 
             var chainValid = customChain.Build(certificate);

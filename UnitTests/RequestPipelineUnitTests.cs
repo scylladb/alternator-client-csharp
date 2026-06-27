@@ -48,6 +48,74 @@ namespace ScyllaDB.Alternator
         }
 
         [Test]
+        public void AlternatorHttpClientFactoryAppliesPreloadedClientCertificateToHandlersTest()
+        {
+            using var certificate = CreateSelfSignedCertificate("CN=alternator-client-test", true);
+            var tlsConfig = TlsConfig.builder()
+                .withClientCertificate(certificate)
+                .build();
+
+            using var httpClientHandler = CreateAlternatorHttpClientHandler(tlsConfig, 10, _ => { });
+            Assert.That(httpClientHandler.ClientCertificateOptions, Is.EqualTo(ClientCertificateOption.Manual));
+            Assert.That(httpClientHandler.ClientCertificates, Has.Count.EqualTo(1));
+            Assert.That(((X509Certificate2)httpClientHandler.ClientCertificates[0]).HasPrivateKey, Is.True);
+
+            var alternatorConfig = AlternatorConfig.builder()
+                .withTlsConfig(tlsConfig)
+                .build();
+            using var socketsHttpHandler = CreateAlternatorSocketsHttpHandler(alternatorConfig, _ => { });
+            Assert.That(socketsHttpHandler.SslOptions.ClientCertificates, Is.Not.Null);
+            Assert.That(socketsHttpHandler.SslOptions.ClientCertificates, Has.Count.EqualTo(1));
+            Assert.That(((X509Certificate2)socketsHttpHandler.SslOptions.ClientCertificates![0]).HasPrivateKey, Is.True);
+        }
+
+        [Test]
+        public void AlternatorHttpClientFactoryAcceptsPreloadedCustomCaCertificateTest()
+        {
+            using var caCertificate = CreateSelfSignedCertificate("CN=alternator-ca-test", true);
+            using var serverCertificate = CreateIssuedCertificate("CN=alternator-server-test", caCertificate);
+            using var chain = new X509Chain();
+            var tlsConfig = TlsConfig.builder()
+                .withTrustSystemCaCerts(false)
+                .withCaCertificate(caCertificate)
+                .build();
+
+            var accepted = InvokeValidateCertificate(
+                tlsConfig,
+                serverCertificate,
+                chain,
+                SslPolicyErrors.RemoteCertificateChainErrors);
+
+            Assert.That(accepted, Is.True);
+        }
+
+        [Test]
+        public void AlternatorHttpClientFactoryUsesCustomCertificateValidationCallbackTest()
+        {
+            var callbackCalled = false;
+            using var certificate = CreateSelfSignedCertificate("CN=alternator-callback-test", true);
+            using var chain = new X509Chain();
+            var tlsConfig = TlsConfig.builder()
+                .withTrustSystemCaCerts(false)
+                .withCertificateValidationCallback((_, callbackCertificate, _, sslPolicyErrors) =>
+                {
+                    callbackCalled = ReferenceEquals(certificate, callbackCertificate)
+                        && sslPolicyErrors == SslPolicyErrors.RemoteCertificateChainErrors;
+                    return true;
+                })
+                .build();
+
+            var accepted = InvokeValidateCertificate(
+                tlsConfig,
+                certificate,
+                chain,
+                SslPolicyErrors.RemoteCertificateChainErrors);
+
+            Assert.That(accepted, Is.True);
+            Assert.That(callbackCalled, Is.True);
+        }
+
+        [Test]
         public void AlternatorHttpClientFactoryAppliesTlsSessionResumptionSettingTest()
         {
             var defaultConfig = AlternatorConfig.builder()
@@ -445,6 +513,42 @@ namespace ScyllaDB.Alternator
             File.WriteAllText(certificatePath, certificate.ExportCertificatePem());
             File.WriteAllText(privateKeyPath, rsa.ExportPkcs8PrivateKeyPem());
             return (directory, certificatePath, privateKeyPath);
+        }
+
+        private static X509Certificate2 CreateSelfSignedCertificate(string subjectName, bool certificateAuthority)
+        {
+            using var rsa = RSA.Create(2048);
+            var request = new CertificateRequest(
+                subjectName,
+                rsa,
+                HashAlgorithmName.SHA256,
+                RSASignaturePadding.Pkcs1);
+            request.CertificateExtensions.Add(new X509BasicConstraintsExtension(certificateAuthority, false, 0, true));
+            request.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(request.PublicKey, false));
+            using var certificate = request.CreateSelfSigned(
+                DateTimeOffset.UtcNow.AddMinutes(-1),
+                DateTimeOffset.UtcNow.AddDays(1));
+            return new X509Certificate2(certificate.Export(X509ContentType.Pkcs12));
+        }
+
+        private static X509Certificate2 CreateIssuedCertificate(string subjectName, X509Certificate2 issuer)
+        {
+            using var rsa = RSA.Create(2048);
+            var request = new CertificateRequest(
+                subjectName,
+                rsa,
+                HashAlgorithmName.SHA256,
+                RSASignaturePadding.Pkcs1);
+            request.CertificateExtensions.Add(new X509BasicConstraintsExtension(false, false, 0, true));
+            request.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(request.PublicKey, false));
+            var serialNumber = RandomNumberGenerator.GetBytes(16);
+            using var certificate = request.Create(
+                issuer,
+                DateTimeOffset.UtcNow.AddMinutes(-1),
+                new DateTimeOffset(issuer.NotAfter).AddMinutes(-1),
+                serialNumber);
+            using var certificateWithPrivateKey = certificate.CopyWithPrivateKey(rsa);
+            return new X509Certificate2(certificateWithPrivateKey.Export(X509ContentType.Pkcs12));
         }
 
         private static DefaultRequest CreateDefaultRequest(byte[] content = null!, Stream? contentStream = null)
