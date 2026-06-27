@@ -101,6 +101,8 @@ namespace ScyllaDB.Alternator
                 .BuildWithAlternatorAPI();
 
             await WaitUntilAsync(() => wrapper.getLiveNodes().Count > 0);
+            var liveNodesManager = wrapper.getAlternatorLiveNodes();
+            liveNodesManager.shutdownAndWait();
             var liveNodes = wrapper.getLiveNodes();
             var next = wrapper.nextAsURI();
             var config = wrapper.GetAlternatorConfig();
@@ -108,7 +110,7 @@ namespace ScyllaDB.Alternator
             Assert.That(wrapper.getClient(), Is.InstanceOf<AmazonDynamoDBClient>());
             Assert.That(config, Is.Not.Null);
             Assert.That(config!.SeedHosts, Is.Not.Empty);
-            Assert.That(wrapper.getAlternatorLiveNodes().getLiveNodes(), Is.EqualTo(liveNodes));
+            Assert.That(liveNodesManager.getLiveNodes(), Is.EqualTo(liveNodes));
             Assert.That(liveNodes, Does.Contain(next));
         }
 
