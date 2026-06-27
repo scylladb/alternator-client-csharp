@@ -562,6 +562,51 @@ namespace ScyllaDB.Alternator
         }
 
         [Test]
+        public void AlternatorDynamoDBClientBuilderSupportsConnectionTuningAliasesTest()
+        {
+            using var wrapper = AlternatorDynamoDBClient.builder()
+                .endpointOverride("http://127.0.0.1:8080")
+                .withMaxIdleHttpConnections(61)
+                .withMaxIdleHttpConnectionsPerHost(62)
+                .withIdleHttpConnectionTimeoutMs(63000)
+                .withConnectionTimeoutMs(64000)
+                .withHttpClientTimeoutMs(65000)
+                .WithoutValidation()
+                .WithDeferredStart()
+                .buildWithAlternatorAPI();
+
+            Assert.That(wrapper.Config.getMaxConnections(), Is.EqualTo(62));
+            Assert.That(wrapper.Config.getConnectionMaxIdleTimeMs(), Is.EqualTo(63000));
+            Assert.That(wrapper.Config.getConnectionTimeoutMs(), Is.EqualTo(64000));
+            Assert.That(wrapper.Config.getHttpClientTimeoutMs(), Is.EqualTo(65000));
+            Assert.That(wrapper.getClient().Config.Timeout, Is.EqualTo(TimeSpan.FromMilliseconds(65000)));
+            Assert.That(wrapper.getClient().Config.MaxConnectionsPerServer, Is.EqualTo(62));
+        }
+
+        [Test]
+        public void AlternatorDynamoDBClientBuilderPreservesSplitTimeoutsFromConfigTest()
+        {
+            var config = AlternatorConfig.builder()
+                .withSeedNode("http://127.0.0.1:8080")
+                .withConnectionTimeoutMs(71000)
+                .withHttpClientTimeoutMs(72000)
+                .build();
+
+            using var wrapper = AlternatorDynamoDBClient.builder()
+                .withAlternatorConfig(config)
+                .endpointOverride("http://127.0.0.1:8080")
+                .WithoutValidation()
+                .WithDeferredStart()
+                .buildWithAlternatorAPI();
+
+            var liveNodesConfig = GetAlternatorLiveNodesConfig(wrapper.getAlternatorLiveNodes());
+            Assert.That(wrapper.Config.getConnectionTimeoutMs(), Is.EqualTo(71000));
+            Assert.That(wrapper.Config.getHttpClientTimeoutMs(), Is.EqualTo(72000));
+            Assert.That(wrapper.getClient().Config.Timeout, Is.EqualTo(TimeSpan.FromMilliseconds(72000)));
+            Assert.That(liveNodesConfig.getHttpClientTimeoutMs(), Is.EqualTo(72000));
+        }
+
+        [Test]
         public void AlternatorDynamoDBClientBuilderSupportsCompressionAndHeaderOptimizationTest()
         {
             using var wrapper = AlternatorDynamoDBClient.builder()

@@ -139,6 +139,25 @@ namespace ScyllaDB.Alternator
         }
 
         [Test]
+        public void AlternatorHttpClientFactoryAppliesConnectionTuningToSocketsHandlerTest()
+        {
+            var config = AlternatorConfig.builder()
+                .withMaxIdleHttpConnectionsPerHost(82)
+                .withIdleHttpConnectionTimeoutMs(83000)
+                .withConnectionTimeToLiveMs(84000)
+                .withConnectionTimeoutMs(85000)
+                .withHttpClientTimeoutMs(86000)
+                .build();
+
+            using var handler = CreateAlternatorSocketsHttpHandler(config, _ => { });
+
+            Assert.That(handler.MaxConnectionsPerServer, Is.EqualTo(82));
+            Assert.That(handler.PooledConnectionIdleTimeout, Is.EqualTo(TimeSpan.FromMilliseconds(83000)));
+            Assert.That(handler.PooledConnectionLifetime, Is.EqualTo(TimeSpan.FromMilliseconds(84000)));
+            Assert.That(handler.ConnectTimeout, Is.EqualTo(TimeSpan.FromMilliseconds(85000)));
+        }
+
+        [Test]
         public void AlternatorHttpClientFactoryRejectsSystemTrustedCertificateWithHostnameMismatchTest()
         {
             using var certificate = LoadSystemTrustedCertificate();

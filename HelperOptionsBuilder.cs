@@ -147,6 +147,88 @@ namespace ScyllaDB.Alternator
             return this;
         }
 
+        public HelperOptionsBuilder WithMaxConnections(int maxConnections)
+        {
+            if (maxConnections <= 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(maxConnections));
+            }
+
+            this.options.MaxConnections = maxConnections;
+            return this;
+        }
+
+        public HelperOptionsBuilder WithMaxIdleHttpConnections(int maxIdleHttpConnections)
+        {
+            return this.WithMaxConnections(maxIdleHttpConnections);
+        }
+
+        public HelperOptionsBuilder WithMaxIdleHttpConnectionsPerHost(int maxIdleHttpConnectionsPerHost)
+        {
+            return this.WithMaxConnections(maxIdleHttpConnectionsPerHost);
+        }
+
+        public HelperOptionsBuilder WithConnectionMaxIdleTimeMs(long connectionMaxIdleTimeMs)
+        {
+            if (connectionMaxIdleTimeMs < 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(connectionMaxIdleTimeMs));
+            }
+
+            this.options.ConnectionMaxIdleTimeMs = connectionMaxIdleTimeMs;
+            return this;
+        }
+
+        public HelperOptionsBuilder WithIdleHttpConnectionTimeoutMs(long idleHttpConnectionTimeoutMs)
+        {
+            return this.WithConnectionMaxIdleTimeMs(idleHttpConnectionTimeoutMs);
+        }
+
+        public HelperOptionsBuilder WithConnectionTimeToLiveMs(long connectionTimeToLiveMs)
+        {
+            if (connectionTimeToLiveMs < 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(connectionTimeToLiveMs));
+            }
+
+            this.options.ConnectionTimeToLiveMs = connectionTimeToLiveMs;
+            return this;
+        }
+
+        public HelperOptionsBuilder WithConnectionAcquisitionTimeoutMs(long connectionAcquisitionTimeoutMs)
+        {
+            if (connectionAcquisitionTimeoutMs < 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(connectionAcquisitionTimeoutMs));
+            }
+
+            this.options.ConnectionAcquisitionTimeoutMs = connectionAcquisitionTimeoutMs;
+            return this;
+        }
+
+        public HelperOptionsBuilder WithConnectionTimeoutMs(long connectionTimeoutMs)
+        {
+            if (connectionTimeoutMs < 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(connectionTimeoutMs));
+            }
+
+            this.options.ConnectionTimeoutMs = connectionTimeoutMs;
+            this.options.HttpClientTimeoutMs = connectionTimeoutMs;
+            return this;
+        }
+
+        public HelperOptionsBuilder WithHttpClientTimeoutMs(long httpClientTimeoutMs)
+        {
+            if (httpClientTimeoutMs < 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(httpClientTimeoutMs));
+            }
+
+            this.options.HttpClientTimeoutMs = httpClientTimeoutMs;
+            return this;
+        }
+
         public HelperOptionsBuilder WithTlsConfig(TlsConfig tlsConfig)
         {
             this.options.TlsConfig = tlsConfig ?? TlsConfig.TrustAll();

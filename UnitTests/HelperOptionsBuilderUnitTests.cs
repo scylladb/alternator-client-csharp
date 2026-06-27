@@ -125,5 +125,35 @@ namespace ScyllaDB.Alternator
             Assert.That(wrapper.Config.ResponseCompressionAlgorithms, Is.EqualTo(new[] { ResponseCompressionAlgorithm.Gzip }));
             Assert.That(disabledWrapper.Config.ResponseCompressionAlgorithms, Is.Empty);
         }
+
+        [Test]
+        [Category("Unit")]
+        public void HelperOptionsBuilderSupportsConnectionTuningAliasesTest()
+        {
+            var options = HelperOptionsBuilder.Create()
+                .WithInitialNodeUri(new Uri("http://127.0.0.1:8080"))
+                .WithMaxIdleHttpConnections(71)
+                .WithMaxIdleHttpConnectionsPerHost(72)
+                .WithIdleHttpConnectionTimeoutMs(73000)
+                .WithConnectionTimeToLiveMs(74000)
+                .WithConnectionAcquisitionTimeoutMs(75000)
+                .WithConnectionTimeoutMs(76000)
+                .WithHttpClientTimeoutMs(77000)
+                .WithoutValidation()
+                .WithDeferredStart()
+                .Build();
+
+            using var wrapper = AlternatorDynamoDBClient.builder()
+                .WithOptions(options)
+                .buildWithAlternatorAPI();
+
+            Assert.That(wrapper.Config.MaxConnections, Is.EqualTo(72));
+            Assert.That(wrapper.Config.ConnectionMaxIdleTimeMs, Is.EqualTo(73000));
+            Assert.That(wrapper.Config.ConnectionTimeToLiveMs, Is.EqualTo(74000));
+            Assert.That(wrapper.Config.ConnectionAcquisitionTimeoutMs, Is.EqualTo(75000));
+            Assert.That(wrapper.Config.ConnectionTimeoutMs, Is.EqualTo(76000));
+            Assert.That(wrapper.Config.HttpClientTimeoutMs, Is.EqualTo(77000));
+            Assert.That(wrapper.getClient().Config.Timeout, Is.EqualTo(TimeSpan.FromMilliseconds(77000)));
+        }
     }
 }

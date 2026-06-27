@@ -491,7 +491,8 @@ namespace ScyllaDB.Alternator
                 .WithConnectionMaxIdleTimeMs(config.ConnectionMaxIdleTimeMs)
                 .WithConnectionTimeToLiveMs(config.ConnectionTimeToLiveMs)
                 .WithConnectionAcquisitionTimeoutMs(config.ConnectionAcquisitionTimeoutMs)
-                .WithConnectionTimeoutMs(config.ConnectionTimeoutMs);
+                .WithConnectionTimeoutMs(config.ConnectionTimeoutMs)
+                .WithHttpClientTimeoutMs(config.HttpClientTimeoutMs);
 
             config.CopyHeaderOptimizationTo(builder);
             return builder.Build();

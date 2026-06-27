@@ -139,6 +139,33 @@ namespace ScyllaDB.Alternator
         }
 
         [Test]
+        public void AlternatorConfigBuilderSupportsConnectionTuningAliasesTest()
+        {
+            var config = AlternatorConfig.builder()
+                .withMaxIdleHttpConnections(51)
+                .withMaxIdleHttpConnectionsPerHost(52)
+                .withIdleHttpConnectionTimeoutMs(53000)
+                .withConnectionTimeoutMs(54000)
+                .build();
+
+            Assert.That(config.getMaxConnections(), Is.EqualTo(52));
+            Assert.That(config.getConnectionMaxIdleTimeMs(), Is.EqualTo(53000));
+            Assert.That(config.getConnectionTimeoutMs(), Is.EqualTo(54000));
+            Assert.That(config.getHttpClientTimeoutMs(), Is.EqualTo(54000));
+
+            var splitTimeouts = AlternatorConfig.Builder()
+                .WithConnectionTimeoutMs(11000)
+                .WithHttpClientTimeoutMs(12000)
+                .Build();
+            Assert.That(splitTimeouts.ConnectionTimeoutMs, Is.EqualTo(11000));
+            Assert.That(splitTimeouts.HttpClientTimeoutMs, Is.EqualTo(12000));
+
+            Assert.Throws<ArgumentException>(() => AlternatorConfig.builder()
+                .withHttpClientTimeoutMs(-1)
+                .build());
+        }
+
+        [Test]
         public void AlternatorConfigBuilderComputesOptimizedHeadersFromEffectiveConfigTest()
         {
             var minimal = AlternatorConfig.builder()

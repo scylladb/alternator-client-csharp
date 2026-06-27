@@ -176,6 +176,7 @@ AmazonDynamoDBClient client = AlternatorDynamoDBClient.builder()
     .withConnectionTimeToLiveMs(60000)
     .withConnectionAcquisitionTimeoutMs(5000)
     .withConnectionTimeoutMs(3000)
+    .withHttpClientTimeoutMs(10000)
     .build();
 ```
 
@@ -185,7 +186,17 @@ AmazonDynamoDBClient client = AlternatorDynamoDBClient.builder()
 | `connectionMaxIdleTimeMs` | 600000 | Maximum idle time for pooled connections. |
 | `connectionTimeToLiveMs` | 0 | Maximum lifetime for pooled connections; `0` means unlimited. |
 | `connectionAcquisitionTimeoutMs` | 10000 | Stored for Java API parity; .NET does not expose a separate per-pool acquisition timeout. |
-| `connectionTimeoutMs` | 15000 | Applied to `AmazonDynamoDBConfig.Timeout` and `SocketsHttpHandler.ConnectTimeout`. |
+| `connectionTimeoutMs` | 15000 | Applied to `SocketsHttpHandler.ConnectTimeout`. For compatibility, setting this also updates `httpClientTimeoutMs` unless that value is set later. |
+| `httpClientTimeoutMs` | 15000 | Applied to `AmazonDynamoDBConfig.Timeout`; use `0` to leave the AWS SDK timeout unchanged. |
+
+Additional HTTP transport aliases are available for callers using cross-SDK option names:
+
+| Alias | Effective C# setting | Notes |
+|---|---|---|
+| `maxIdleHttpConnections` | `maxConnections` | .NET exposes `SocketsHttpHandler.MaxConnectionsPerServer`, not a separate total idle-connection cap. |
+| `maxIdleHttpConnectionsPerHost` | `maxConnections` | Maps to the per-server connection limit. |
+| `idleHttpConnectionTimeoutMs` | `connectionMaxIdleTimeMs` | Maps to `SocketsHttpHandler.PooledConnectionIdleTimeout`. |
+| `httpClientTimeoutMs` | `AmazonDynamoDBConfig.Timeout` | Controls the whole request timeout independently from socket connect timeout. |
 
 ## TLS
 
