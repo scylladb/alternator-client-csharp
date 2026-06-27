@@ -97,26 +97,13 @@ namespace ScyllaDB.Alternator
 
         private static string? Transform(string? current, Func<string, string?>? transformer, bool appendDefaultToken)
         {
-            var userAgent = appendDefaultToken ? AppendDefaultToken(current) : current;
+            var userAgent = appendDefaultToken ? UserAgentToken : current;
             if (transformer != null)
             {
                 userAgent = transformer(userAgent ?? string.Empty);
             }
 
             return string.IsNullOrWhiteSpace(userAgent) ? null : userAgent.Trim();
-        }
-
-        private static string AppendDefaultToken(string? current)
-        {
-            if (string.IsNullOrWhiteSpace(current))
-            {
-                return UserAgentToken;
-            }
-
-            var trimmed = current.Trim();
-            return trimmed.Contains(UserAgentToken, StringComparison.Ordinal)
-                ? trimmed
-                : trimmed + " " + UserAgentToken;
         }
 
         private static string ResolveVersion()

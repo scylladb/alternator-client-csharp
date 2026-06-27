@@ -369,7 +369,7 @@ namespace ScyllaDB.Alternator
         }
 
         [Test]
-        public void AlternatorUserAgentApplyToRequestAppendsTokenToAwsSdkUserAgentHeaderTest()
+        public void AlternatorUserAgentApplyToRequestReplacesAwsSdkUserAgentHeaderTest()
         {
             var token = GetAlternatorUserAgentToken();
             var applyTo = GetAlternatorUserAgentApplyTo();
@@ -381,7 +381,8 @@ namespace ScyllaDB.Alternator
 
             applyTo(request, headers);
 
-            Assert.That(headers["User-Agent"], Is.EqualTo("aws-sdk-dotnet/4.x " + token));
+            Assert.That(headers["User-Agent"], Is.EqualTo(token));
+            Assert.That(headers["User-Agent"], Does.Not.Contain("aws-sdk-dotnet"));
         }
 
         [Test]
@@ -404,15 +405,7 @@ namespace ScyllaDB.Alternator
                 ["User-Agent"] = "aws-sdk-dotnet/4.x",
             };
             applyTo(transformRequest, transformHeaders, userAgent => "prefix " + userAgent + " suffix", true);
-            Assert.That(transformHeaders["User-Agent"], Is.EqualTo("prefix aws-sdk-dotnet/4.x " + token + " suffix"));
-
-            var appendRequest = new PutItemRequest();
-            var appendHeaders = new Dictionary<string, string>
-            {
-                ["User-Agent"] = "aws-sdk-dotnet/4.x",
-            };
-            applyTo(appendRequest, appendHeaders, userAgent => userAgent + " my-app/1.0", true);
-            Assert.That(appendHeaders["User-Agent"], Is.EqualTo("aws-sdk-dotnet/4.x " + token + " my-app/1.0"));
+            Assert.That(transformHeaders["User-Agent"], Is.EqualTo("prefix " + token + " suffix"));
 
             var removeRequest = new PutItemRequest();
             var removeHeaders = new Dictionary<string, string>
