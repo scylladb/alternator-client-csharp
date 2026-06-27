@@ -170,6 +170,23 @@ namespace ScyllaDB.Alternator
             return this;
         }
 
+        public HelperOptionsBuilder WithResponseCompression(params ResponseCompressionAlgorithm[] algorithms)
+        {
+            return this.WithResponseCompression((IEnumerable<ResponseCompressionAlgorithm>)algorithms);
+        }
+
+        public HelperOptionsBuilder WithResponseCompression(IEnumerable<ResponseCompressionAlgorithm> algorithms)
+        {
+            this.options.ResponseCompressionAlgorithms = AlternatorConfig.NormalizeResponseCompressionAlgorithms(algorithms);
+            return this;
+        }
+
+        public HelperOptionsBuilder WithoutResponseCompression()
+        {
+            this.options.ResponseCompressionAlgorithms = Array.Empty<ResponseCompressionAlgorithm>();
+            return this;
+        }
+
         public HelperOptionsBuilder WithOptimizeHeaders(bool optimizeHeaders)
         {
             this.options.OptimizeHeaders = optimizeHeaders;

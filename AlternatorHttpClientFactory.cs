@@ -37,6 +37,11 @@ namespace ScyllaDB.Alternator
                 handler = new HeadersFilteringHttpMessageHandler(handler, this.config.HeadersWhitelist);
             }
 
+            if (this.config.ResponseCompressionAlgorithms.Count > 0)
+            {
+                handler = new ResponseCompressionHttpMessageHandler(handler, this.config.ResponseCompressionAlgorithms);
+            }
+
             return new HttpClient(handler);
         }
 

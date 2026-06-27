@@ -37,6 +37,13 @@ namespace ScyllaDB.Alternator
         public const long RECOMMENDED_PARTITION_KEY_DISCOVERY_COOLDOWN_MS = RecommendedPartitionKeyDiscoveryCooldownMs;
 #pragma warning restore SA1310, IDE1006
 
+        public static readonly IReadOnlyList<ResponseCompressionAlgorithm> DefaultResponseCompressionAlgorithms =
+            NormalizeResponseCompressionAlgorithms(new[]
+            {
+                ResponseCompressionAlgorithm.Gzip,
+                ResponseCompressionAlgorithm.Deflate,
+            });
+
         public static readonly IReadOnlySet<string> BaseRequiredHeaders = CreateReadOnlyHeaderSet(new[]
         {
             "Host",
@@ -77,6 +84,7 @@ namespace ScyllaDB.Alternator
             RoutingScope routingScope,
             RequestCompressionAlgorithm compressionAlgorithm,
             int minCompressionSizeBytes,
+            IEnumerable<ResponseCompressionAlgorithm> responseCompressionAlgorithms,
             bool optimizeHeaders,
             ISet<string>? headersWhitelist,
             bool headersWhitelistWasSet,
@@ -99,6 +107,7 @@ namespace ScyllaDB.Alternator
             this.RoutingScope = routingScope;
             this.CompressionAlgorithm = compressionAlgorithm;
             this.MinCompressionSizeBytes = minCompressionSizeBytes >= 0 ? minCompressionSizeBytes : DefaultMinCompressionSizeBytes;
+            this.ResponseCompressionAlgorithms = NormalizeResponseCompressionAlgorithms(responseCompressionAlgorithms);
             this.OptimizeHeaders = optimizeHeaders;
             this.UserAgentEnabled = userAgentEnabled;
             this.AuthenticationEnabled = authenticationEnabled;
@@ -128,6 +137,8 @@ namespace ScyllaDB.Alternator
         public RequestCompressionAlgorithm CompressionAlgorithm { get; }
 
         public int MinCompressionSizeBytes { get; }
+
+        public IReadOnlyList<ResponseCompressionAlgorithm> ResponseCompressionAlgorithms { get; }
 
         public bool OptimizeHeaders { get; }
 
@@ -225,6 +236,11 @@ namespace ScyllaDB.Alternator
             return this.MinCompressionSizeBytes;
         }
 
+        public IReadOnlyList<ResponseCompressionAlgorithm> getResponseCompressionAlgorithms()
+        {
+            return this.ResponseCompressionAlgorithms;
+        }
+
         public bool isOptimizeHeaders()
         {
             return this.OptimizeHeaders;
@@ -299,6 +315,38 @@ namespace ScyllaDB.Alternator
         internal static ReadOnlySet<string> CreateReadOnlyHeaderSet(IEnumerable<string> headers)
         {
             return new ReadOnlySet<string>(headers, StringComparer.OrdinalIgnoreCase);
+        }
+
+        internal static IReadOnlyList<ResponseCompressionAlgorithm> NormalizeResponseCompressionAlgorithms(
+            IEnumerable<ResponseCompressionAlgorithm>? algorithms)
+        {
+            if (algorithms == null)
+            {
+                throw new ArgumentNullException(nameof(algorithms));
+            }
+
+            var normalized = new List<ResponseCompressionAlgorithm>();
+            var seen = new HashSet<ResponseCompressionAlgorithm>();
+            foreach (var algorithm in algorithms)
+            {
+                switch (algorithm)
+                {
+                    case ResponseCompressionAlgorithm.Gzip:
+                    case ResponseCompressionAlgorithm.Deflate:
+                        if (seen.Add(algorithm))
+                        {
+                            normalized.Add(algorithm);
+                        }
+
+                        break;
+                    default:
+                        throw new ArgumentException(
+                            "Unsupported response compression algorithm: " + algorithm,
+                            nameof(algorithms));
+                }
+            }
+
+            return normalized.AsReadOnly();
         }
 
         internal AlternatorConfigBuilder CopyHeaderOptimizationTo(AlternatorConfigBuilder builder)

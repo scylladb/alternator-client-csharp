@@ -277,6 +277,24 @@ namespace ScyllaDB.Alternator
             return this;
         }
 
+        public AlternatorDynamoDBClientBuilder WithResponseCompression(params ResponseCompressionAlgorithm[] algorithms)
+        {
+            this.configBuilder.WithResponseCompression(algorithms);
+            return this;
+        }
+
+        public AlternatorDynamoDBClientBuilder WithResponseCompression(IEnumerable<ResponseCompressionAlgorithm> algorithms)
+        {
+            this.configBuilder.WithResponseCompression(algorithms);
+            return this;
+        }
+
+        public AlternatorDynamoDBClientBuilder WithoutResponseCompression()
+        {
+            this.configBuilder.WithoutResponseCompression();
+            return this;
+        }
+
         public AlternatorDynamoDBClientBuilder WithOptimizeHeaders(bool optimizeHeaders)
         {
             this.configBuilder.WithOptimizeHeaders(optimizeHeaders);
@@ -633,6 +651,21 @@ namespace ScyllaDB.Alternator
             return this.WithMinCompressionSizeBytes(minCompressionSizeBytes);
         }
 
+        public AlternatorDynamoDBClientBuilder withResponseCompression(params ResponseCompressionAlgorithm[] algorithms)
+        {
+            return this.WithResponseCompression(algorithms);
+        }
+
+        public AlternatorDynamoDBClientBuilder withResponseCompression(IEnumerable<ResponseCompressionAlgorithm> algorithms)
+        {
+            return this.WithResponseCompression(algorithms);
+        }
+
+        public AlternatorDynamoDBClientBuilder withoutResponseCompression()
+        {
+            return this.WithoutResponseCompression();
+        }
+
         public AlternatorDynamoDBClientBuilder withOptimizeHeaders(bool optimizeHeaders)
         {
             return this.WithOptimizeHeaders(optimizeHeaders);
@@ -838,6 +871,7 @@ namespace ScyllaDB.Alternator
                 .WithRoutingScope(config.RoutingScope)
                 .WithCompressionAlgorithm(config.CompressionAlgorithm)
                 .WithMinCompressionSizeBytes(config.MinCompressionSizeBytes)
+                .WithResponseCompression(config.ResponseCompressionAlgorithms)
                 .WithOptimizeHeaders(config.OptimizeHeaders)
                 .WithUserAgentEnabled(config.UserAgentEnabled)
                 .WithAuthenticationEnabled(config.AuthenticationEnabled)
@@ -1051,6 +1085,7 @@ namespace ScyllaDB.Alternator
                 .WithRoutingScope(config.RoutingScope)
                 .WithCompressionAlgorithm(config.CompressionAlgorithm)
                 .WithMinCompressionSizeBytes(config.MinCompressionSizeBytes)
+                .WithResponseCompression(config.ResponseCompressionAlgorithms)
                 .WithOptimizeHeaders(config.OptimizeHeaders)
                 .WithUserAgentEnabled(config.UserAgentEnabled)
                 .WithAuthenticationEnabled(config.AuthenticationEnabled)

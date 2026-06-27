@@ -593,6 +593,26 @@ namespace ScyllaDB.Alternator
         }
 
         [Test]
+        public void AlternatorDynamoDBClientBuilderSupportsResponseCompressionConfigurationTest()
+        {
+            using var deflateWrapper = AlternatorDynamoDBClient.builder()
+                .endpointOverride("http://127.0.0.1:8080")
+                .withResponseCompression(ResponseCompressionAlgorithm.DEFLATE)
+                .WithoutValidation()
+                .WithDeferredStart()
+                .buildWithAlternatorAPI();
+            using var disabledWrapper = AlternatorDynamoDBClient.builder()
+                .endpointOverride("http://127.0.0.1:8081")
+                .withoutResponseCompression()
+                .WithoutValidation()
+                .WithDeferredStart()
+                .buildWithAlternatorAPI();
+
+            Assert.That(deflateWrapper.Config.ResponseCompressionAlgorithms, Is.EqualTo(new[] { ResponseCompressionAlgorithm.Deflate }));
+            Assert.That(disabledWrapper.Config.ResponseCompressionAlgorithms, Is.Empty);
+        }
+
+        [Test]
         public void AlternatorDynamoDBClientBuilderSupportsCustomHeaderOptimizerTest()
         {
             var calledWithAuthentication = false;

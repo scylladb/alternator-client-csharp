@@ -4,6 +4,7 @@
 
 namespace ScyllaDB.Alternator
 {
+    using System.IO.Compression;
     using System.Net.Security;
     using System.Security.Cryptography;
     using System.Security.Cryptography.X509Certificates;
@@ -96,6 +97,89 @@ namespace ScyllaDB.Alternator
             {
                 File.Delete(caPath);
             }
+        }
+
+        [Test]
+        public async Task ResponseCompressionHttpMessageHandlerDecodesGzipResponsesTest()
+        {
+            var responseBody = "{\"ok\":true}";
+            var compressedBody = Compress(responseBody, ResponseCompressionAlgorithm.Gzip);
+            var innerHandler = new CapturingHttpMessageHandler(_ => CreateCompressedResponse(
+                compressedBody,
+                "gzip"));
+            using var handler = new ResponseCompressionHttpMessageHandler(
+                innerHandler,
+                AlternatorConfig.DefaultResponseCompressionAlgorithms);
+            using var client = new HttpClient(handler);
+
+            using var response = await client.GetAsync("http://127.0.0.1/");
+            var body = await response.Content.ReadAsStringAsync();
+
+            Assert.That(innerHandler.Request, Is.Not.Null);
+            Assert.That(
+                string.Join(", ", innerHandler.Request!.Headers.GetValues("Accept-Encoding")),
+                Is.EqualTo("gzip, deflate"));
+            Assert.That(body, Is.EqualTo(responseBody));
+            Assert.That(response.Content.Headers.ContentEncoding, Is.Empty);
+        }
+
+        [Test]
+        public async Task ResponseCompressionHttpMessageHandlerDecodesDeflateResponsesTest()
+        {
+            var responseBody = "{\"ok\":true}";
+            var compressedBody = Compress(responseBody, ResponseCompressionAlgorithm.Deflate);
+            var innerHandler = new CapturingHttpMessageHandler(_ => CreateCompressedResponse(
+                compressedBody,
+                "deflate"));
+            using var handler = new ResponseCompressionHttpMessageHandler(
+                innerHandler,
+                AlternatorConfig.DefaultResponseCompressionAlgorithms);
+            using var client = new HttpClient(handler);
+
+            using var response = await client.GetAsync("http://127.0.0.1/");
+            var body = await response.Content.ReadAsStringAsync();
+
+            Assert.That(body, Is.EqualTo(responseBody));
+            Assert.That(response.Content.Headers.ContentEncoding, Is.Empty);
+        }
+
+        [Test]
+        public async Task ResponseCompressionHttpMessageHandlerCanBeDisabledTest()
+        {
+            var innerHandler = new CapturingHttpMessageHandler(_ => new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+            {
+                Content = new StringContent("plain"),
+            });
+            using var handler = new ResponseCompressionHttpMessageHandler(
+                innerHandler,
+                Array.Empty<ResponseCompressionAlgorithm>());
+            using var client = new HttpClient(handler);
+
+            using var response = await client.GetAsync("http://127.0.0.1/");
+            var body = await response.Content.ReadAsStringAsync();
+
+            Assert.That(innerHandler.Request, Is.Not.Null);
+            Assert.That(innerHandler.Request!.Headers.Contains("Accept-Encoding"), Is.False);
+            Assert.That(body, Is.EqualTo("plain"));
+        }
+
+        [Test]
+        public async Task ResponseCompressionHttpMessageHandlerPassesUnsupportedEncodingsThroughTest()
+        {
+            var originalBody = System.Text.Encoding.UTF8.GetBytes("encoded");
+            var innerHandler = new CapturingHttpMessageHandler(_ => CreateCompressedResponse(
+                originalBody,
+                "br"));
+            using var handler = new ResponseCompressionHttpMessageHandler(
+                innerHandler,
+                AlternatorConfig.DefaultResponseCompressionAlgorithms);
+            using var client = new HttpClient(handler);
+
+            using var response = await client.GetAsync("http://127.0.0.1/");
+            var body = await response.Content.ReadAsByteArrayAsync();
+
+            Assert.That(body, Is.EqualTo(originalBody));
+            Assert.That(response.Content.Headers.ContentEncoding, Is.EqualTo(new[] { "br" }));
         }
 
         [Test]
@@ -372,6 +456,39 @@ namespace ScyllaDB.Alternator
             };
         }
 
+        private static HttpResponseMessage CreateCompressedResponse(byte[] content, string contentEncoding)
+        {
+            var response = new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent(content),
+            };
+            response.Content.Headers.ContentEncoding.Add(contentEncoding);
+            response.Content.Headers.ContentLength = content.Length;
+            return response;
+        }
+
+        private static byte[] Compress(string value, ResponseCompressionAlgorithm algorithm)
+        {
+            var data = System.Text.Encoding.UTF8.GetBytes(value);
+            using var output = new MemoryStream();
+            using (var compressed = CreateCompressionStream(output, algorithm))
+            {
+                compressed.Write(data, 0, data.Length);
+            }
+
+            return output.ToArray();
+        }
+
+        private static Stream CreateCompressionStream(Stream output, ResponseCompressionAlgorithm algorithm)
+        {
+            return algorithm switch
+            {
+                ResponseCompressionAlgorithm.Gzip => new GZipStream(output, CompressionLevel.Fastest, true),
+                ResponseCompressionAlgorithm.Deflate => new DeflateStream(output, CompressionLevel.Fastest, true),
+                _ => throw new ArgumentException("Unsupported response compression algorithm: " + algorithm, nameof(algorithm)),
+            };
+        }
+
         private static X509Certificate2 LoadSystemTrustedCertificate()
         {
             var certificate = TryLoadSystemTrustedCertificate(StoreLocation.CurrentUser)
@@ -533,6 +650,18 @@ namespace ScyllaDB.Alternator
 
         private sealed class CapturingHttpMessageHandler : HttpMessageHandler
         {
+            private readonly Func<HttpRequestMessage, HttpResponseMessage> responseFactory;
+
+            internal CapturingHttpMessageHandler()
+                : this(_ => new HttpResponseMessage(System.Net.HttpStatusCode.OK))
+            {
+            }
+
+            internal CapturingHttpMessageHandler(Func<HttpRequestMessage, HttpResponseMessage> responseFactory)
+            {
+                this.responseFactory = responseFactory;
+            }
+
             internal HttpRequestMessage? Request { get; private set; }
 
             internal bool Disposed { get; private set; }
@@ -540,7 +669,7 @@ namespace ScyllaDB.Alternator
             protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
             {
                 this.Request = request;
-                return Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.OK));
+                return Task.FromResult(this.responseFactory(request));
             }
 
             protected override void Dispose(bool disposing)
