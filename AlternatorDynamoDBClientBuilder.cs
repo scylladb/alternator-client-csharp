@@ -289,6 +289,12 @@ namespace ScyllaDB.Alternator
             return this;
         }
 
+        public AlternatorDynamoDBClientBuilder WithCustomOptimizeHeaders(Func<AlternatorConfig, IEnumerable<string>> customOptimizeHeaders)
+        {
+            this.configBuilder.WithCustomOptimizeHeaders(customOptimizeHeaders);
+            return this;
+        }
+
         public AlternatorDynamoDBClientBuilder WithUserAgent(string userAgent)
         {
             this.userAgentTransformer = AlternatorUserAgent.ReplaceWith(userAgent);
@@ -637,6 +643,11 @@ namespace ScyllaDB.Alternator
             return this.WithHeadersWhitelist(headers);
         }
 
+        public AlternatorDynamoDBClientBuilder withCustomOptimizeHeaders(Func<AlternatorConfig, IEnumerable<string>> customOptimizeHeaders)
+        {
+            return this.WithCustomOptimizeHeaders(customOptimizeHeaders);
+        }
+
         public AlternatorDynamoDBClientBuilder withUserAgent(string userAgent)
         {
             return this.WithUserAgent(userAgent);
@@ -820,7 +831,7 @@ namespace ScyllaDB.Alternator
 
         private static AlternatorConfig CreateConfigWithTlsConfig(AlternatorConfig config, TlsConfig tlsConfig)
         {
-            return AlternatorConfig.Builder()
+            var builder = AlternatorConfig.Builder()
                 .WithSeedHosts(config.SeedHosts)
                 .WithScheme(config.Scheme)
                 .WithPort(config.Port)
@@ -828,7 +839,6 @@ namespace ScyllaDB.Alternator
                 .WithCompressionAlgorithm(config.CompressionAlgorithm)
                 .WithMinCompressionSizeBytes(config.MinCompressionSizeBytes)
                 .WithOptimizeHeaders(config.OptimizeHeaders)
-                .WithHeadersWhitelist(config.HeadersWhitelist)
                 .WithUserAgentEnabled(config.UserAgentEnabled)
                 .WithAuthenticationEnabled(config.AuthenticationEnabled)
                 .WithTlsConfig(tlsConfig)
@@ -839,8 +849,10 @@ namespace ScyllaDB.Alternator
                 .WithConnectionMaxIdleTimeMs(config.ConnectionMaxIdleTimeMs)
                 .WithConnectionTimeToLiveMs(config.ConnectionTimeToLiveMs)
                 .WithConnectionAcquisitionTimeoutMs(config.ConnectionAcquisitionTimeoutMs)
-                .WithConnectionTimeoutMs(config.ConnectionTimeoutMs)
-                .Build();
+                .WithConnectionTimeoutMs(config.ConnectionTimeoutMs);
+
+            config.CopyHeaderOptimizationTo(builder);
+            return builder.Build();
         }
 
         private static List<string> NormalizeInitialSeedHosts(IEnumerable<string> seedHosts, string paramName)
@@ -1040,7 +1052,6 @@ namespace ScyllaDB.Alternator
                 .WithCompressionAlgorithm(config.CompressionAlgorithm)
                 .WithMinCompressionSizeBytes(config.MinCompressionSizeBytes)
                 .WithOptimizeHeaders(config.OptimizeHeaders)
-                .WithHeadersWhitelist(config.HeadersWhitelist)
                 .WithUserAgentEnabled(config.UserAgentEnabled)
                 .WithAuthenticationEnabled(config.AuthenticationEnabled)
                 .WithTlsConfig(config.TlsConfig)
@@ -1052,6 +1063,7 @@ namespace ScyllaDB.Alternator
                 .WithConnectionTimeToLiveMs(config.ConnectionTimeToLiveMs)
                 .WithConnectionAcquisitionTimeoutMs(config.ConnectionAcquisitionTimeoutMs)
                 .WithConnectionTimeoutMs(config.ConnectionTimeoutMs);
+            config.CopyHeaderOptimizationTo(this.configBuilder);
         }
 
         private void ApplyLegacyRoutingScope()

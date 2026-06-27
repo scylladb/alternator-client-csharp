@@ -73,6 +73,8 @@ namespace ScyllaDB.Alternator
 
         public ISet<string>? HeadersWhitelist { get; set; }
 
+        public Func<AlternatorConfig, IEnumerable<string>>? CustomOptimizeHeaders { get; set; }
+
         public bool AuthenticationEnabled { get; set; } = true;
 
         public KeyRouteAffinityConfig? KeyRouteAffinityConfig { get; set; }
@@ -92,7 +94,12 @@ namespace ScyllaDB.Alternator
                 .WithIdleRefreshIntervalMs(this.IdleRefreshIntervalMs)
                 .WithTlsConfig(this.TlsConfig);
 
-            if (this.HeadersWhitelist != null)
+            if (this.CustomOptimizeHeaders != null)
+            {
+                builder.WithCustomOptimizeHeaders(this.CustomOptimizeHeaders)
+                    .WithOptimizeHeaders(this.OptimizeHeaders);
+            }
+            else if (this.HeadersWhitelist != null)
             {
                 builder.WithHeadersWhitelist(this.HeadersWhitelist);
             }

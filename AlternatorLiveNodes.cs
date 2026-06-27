@@ -492,11 +492,7 @@ namespace ScyllaDB.Alternator
                 .WithConnectionAcquisitionTimeoutMs(config.ConnectionAcquisitionTimeoutMs)
                 .WithConnectionTimeoutMs(config.ConnectionTimeoutMs);
 
-            if (!new HashSet<string>(config.HeadersWhitelist, StringComparer.OrdinalIgnoreCase).SetEquals(config.RequiredHeaders))
-            {
-                builder.WithHeadersWhitelist(config.HeadersWhitelist);
-            }
-
+            config.CopyHeaderOptimizationTo(builder);
             return builder.Build();
         }
 

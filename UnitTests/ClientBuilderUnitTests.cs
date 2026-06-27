@@ -302,9 +302,11 @@ namespace ScyllaDB.Alternator
         [Test]
         public void AlternatorDynamoDBClientBuilderCopiesAlternatorConfigHeadersWhitelistLikeJavaTest()
         {
-            var config = AlternatorConfig.builder()
+            var configBuilder = AlternatorConfig.builder()
                 .withSeedNode("http://127.0.0.1:8080")
-                .withCompressionAlgorithm(RequestCompressionAlgorithm.NONE)
+                .withCompressionAlgorithm(RequestCompressionAlgorithm.NONE);
+            var config = configBuilder
+                .withHeadersWhitelist(configBuilder.getRequiredHeaders())
                 .build();
 
             var builder = AlternatorDynamoDBClient.builder()
@@ -316,6 +318,25 @@ namespace ScyllaDB.Alternator
 
             var exception = Assert.Throws<ArgumentException>(() => builder.buildWithAlternatorAPI());
             Assert.That(exception!.Message, Does.Contain("Content-Encoding"));
+        }
+
+        [Test]
+        public void AlternatorDynamoDBClientBuilderRecomputesDefaultHeadersWhitelistTest()
+        {
+            var config = AlternatorConfig.builder()
+                .withSeedNode("http://127.0.0.1:8080")
+                .withCompressionAlgorithm(RequestCompressionAlgorithm.NONE)
+                .build();
+
+            using var wrapper = AlternatorDynamoDBClient.builder()
+                .withAlternatorConfig(config)
+                .endpointOverride("http://127.0.0.1:8080")
+                .withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP)
+                .WithoutValidation()
+                .WithDeferredStart()
+                .buildWithAlternatorAPI();
+
+            Assert.That(wrapper.Config.HeadersWhitelist, Does.Contain("Content-Encoding"));
         }
 
         [Test]
@@ -569,6 +590,28 @@ namespace ScyllaDB.Alternator
             Assert.That(wrapper.Config.AuthenticationEnabled, Is.False);
             Assert.That(wrapper.Config.HeadersWhitelist, Does.Contain("Content-Encoding"));
             Assert.That(wrapper.Config.HeadersWhitelist, Does.Not.Contain("Authorization"));
+        }
+
+        [Test]
+        public void AlternatorDynamoDBClientBuilderSupportsCustomHeaderOptimizerTest()
+        {
+            var calledWithAuthentication = false;
+            using var wrapper = AlternatorDynamoDBClient.builder()
+                .endpointOverride("http://127.0.0.1:8080")
+                .credentialsProvider(new BasicAWSCredentials("user", "password"))
+                .withCustomOptimizeHeaders(config =>
+                {
+                    calledWithAuthentication = config.AuthenticationEnabled;
+                    return config.RequiredHeaders.Concat(new[] { "X-Custom-Trace" });
+                })
+                .WithoutValidation()
+                .WithDeferredStart()
+                .buildWithAlternatorAPI();
+
+            Assert.That(calledWithAuthentication, Is.True);
+            Assert.That(wrapper.Config.OptimizeHeaders, Is.True);
+            Assert.That(wrapper.Config.HeadersWhitelist, Does.Contain("Authorization"));
+            Assert.That(wrapper.Config.HeadersWhitelist, Does.Contain("X-Custom-Trace"));
         }
 
         [Test]

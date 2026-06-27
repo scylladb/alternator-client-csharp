@@ -20,6 +20,7 @@ namespace ScyllaDB.Alternator
         private bool optimizeHeaders;
         private ISet<string>? headersWhitelist;
         private bool headersWhitelistWasSet;
+        private Func<AlternatorConfig, IEnumerable<string>>? customOptimizeHeaders;
         private bool userAgentEnabled = true;
         private bool authenticationEnabledValue = true;
         private KeyRouteAffinityConfig? keyRouteAffinityConfig;
@@ -134,6 +135,16 @@ namespace ScyllaDB.Alternator
                 ? new HashSet<string>(headers, StringComparer.OrdinalIgnoreCase)
                 : null;
             this.headersWhitelistWasSet = true;
+            this.customOptimizeHeaders = null;
+            return this;
+        }
+
+        public AlternatorConfigBuilder WithCustomOptimizeHeaders(Func<AlternatorConfig, IEnumerable<string>> customOptimizeHeaders)
+        {
+            this.customOptimizeHeaders = customOptimizeHeaders ?? throw new ArgumentNullException(nameof(customOptimizeHeaders));
+            this.headersWhitelist = null;
+            this.headersWhitelistWasSet = false;
+            this.optimizeHeaders = true;
             return this;
         }
 
@@ -277,6 +288,11 @@ namespace ScyllaDB.Alternator
             return this.WithHeadersWhitelist(headers);
         }
 
+        public AlternatorConfigBuilder withCustomOptimizeHeaders(Func<AlternatorConfig, IEnumerable<string>> customOptimizeHeaders)
+        {
+            return this.WithCustomOptimizeHeaders(customOptimizeHeaders);
+        }
+
         public AlternatorConfigBuilder withUserAgentEnabled(bool userAgentEnabled)
         {
             return this.WithUserAgentEnabled(userAgentEnabled);
@@ -404,6 +420,8 @@ namespace ScyllaDB.Alternator
                 this.minCompressionSizeBytes,
                 this.optimizeHeaders,
                 this.headersWhitelist,
+                this.headersWhitelistWasSet,
+                this.customOptimizeHeaders,
                 this.userAgentEnabled,
                 this.authenticationEnabledValue,
                 this.keyRouteAffinityConfig,
