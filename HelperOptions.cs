@@ -63,6 +63,18 @@ namespace ScyllaDB.Alternator
 
         public long IdleRefreshIntervalMs { get; set; } = AlternatorConfig.DefaultIdleRefreshIntervalMs;
 
+        public int MaxConnections { get; set; } = AlternatorConfig.DefaultMaxConnections;
+
+        public long ConnectionMaxIdleTimeMs { get; set; } = AlternatorConfig.DefaultConnectionMaxIdleTimeMs;
+
+        public long ConnectionTimeToLiveMs { get; set; } = AlternatorConfig.DefaultConnectionTimeToLiveMs;
+
+        public long ConnectionAcquisitionTimeoutMs { get; set; } = AlternatorConfig.DefaultConnectionAcquisitionTimeoutMs;
+
+        public long ConnectionTimeoutMs { get; set; } = AlternatorConfig.DefaultConnectionTimeoutMs;
+
+        public long HttpClientTimeoutMs { get; set; } = AlternatorConfig.DefaultHttpClientTimeoutMs;
+
         public TlsConfig TlsConfig { get; set; } = TlsConfig.TrustAll();
 
         public RequestCompressionAlgorithm CompressionAlgorithm { get; set; } = RequestCompressionAlgorithm.None;
@@ -96,6 +108,12 @@ namespace ScyllaDB.Alternator
                 .WithKeyRouteAffinity(this.KeyRouteAffinityConfig)
                 .WithActiveRefreshIntervalMs(this.ActiveRefreshIntervalMs)
                 .WithIdleRefreshIntervalMs(this.IdleRefreshIntervalMs)
+                .WithMaxConnections(this.MaxConnections)
+                .WithConnectionMaxIdleTimeMs(this.ConnectionMaxIdleTimeMs)
+                .WithConnectionTimeToLiveMs(this.ConnectionTimeToLiveMs)
+                .WithConnectionAcquisitionTimeoutMs(this.ConnectionAcquisitionTimeoutMs)
+                .WithConnectionTimeoutMs(this.ConnectionTimeoutMs)
+                .WithHttpClientTimeoutMs(this.HttpClientTimeoutMs)
                 .WithTlsConfig(this.TlsConfig);
 
             if (this.CustomOptimizeHeaders != null)

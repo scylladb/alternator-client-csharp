@@ -35,6 +35,7 @@ namespace ScyllaDB.Alternator
         private long connectionTimeToLiveMs = AlternatorConfig.DefaultConnectionTimeToLiveMs;
         private long connectionAcquisitionTimeoutMs = AlternatorConfig.DefaultConnectionAcquisitionTimeoutMs;
         private long connectionTimeoutMs = AlternatorConfig.DefaultConnectionTimeoutMs;
+        private long httpClientTimeoutMs = AlternatorConfig.DefaultHttpClientTimeoutMs;
         private TlsConfig? tlsConfig;
 
         public AlternatorConfigBuilder WithSeedNode(Uri? seedUri)
@@ -216,11 +217,26 @@ namespace ScyllaDB.Alternator
             return this;
         }
 
+        public AlternatorConfigBuilder WithMaxIdleHttpConnections(int maxIdleHttpConnections)
+        {
+            return this.WithMaxConnections(maxIdleHttpConnections);
+        }
+
+        public AlternatorConfigBuilder WithMaxIdleHttpConnectionsPerHost(int maxIdleHttpConnectionsPerHost)
+        {
+            return this.WithMaxConnections(maxIdleHttpConnectionsPerHost);
+        }
+
         public AlternatorConfigBuilder WithConnectionMaxIdleTimeMs(long connectionMaxIdleTimeMs)
         {
             this.connectionMaxIdleTimeMs = connectionMaxIdleTimeMs;
             this.connectionMaxIdleTimeMsSet = true;
             return this;
+        }
+
+        public AlternatorConfigBuilder WithIdleHttpConnectionTimeoutMs(long idleHttpConnectionTimeoutMs)
+        {
+            return this.WithConnectionMaxIdleTimeMs(idleHttpConnectionTimeoutMs);
         }
 
         public AlternatorConfigBuilder WithConnectionTimeToLiveMs(long connectionTimeToLiveMs)
@@ -238,6 +254,13 @@ namespace ScyllaDB.Alternator
         public AlternatorConfigBuilder WithConnectionTimeoutMs(long connectionTimeoutMs)
         {
             this.connectionTimeoutMs = connectionTimeoutMs;
+            this.httpClientTimeoutMs = connectionTimeoutMs;
+            return this;
+        }
+
+        public AlternatorConfigBuilder WithHttpClientTimeoutMs(long httpClientTimeoutMs)
+        {
+            this.httpClientTimeoutMs = httpClientTimeoutMs;
             return this;
         }
 
@@ -383,9 +406,24 @@ namespace ScyllaDB.Alternator
             return this.WithMaxConnections(maxConnections);
         }
 
+        public AlternatorConfigBuilder withMaxIdleHttpConnections(int maxIdleHttpConnections)
+        {
+            return this.WithMaxIdleHttpConnections(maxIdleHttpConnections);
+        }
+
+        public AlternatorConfigBuilder withMaxIdleHttpConnectionsPerHost(int maxIdleHttpConnectionsPerHost)
+        {
+            return this.WithMaxIdleHttpConnectionsPerHost(maxIdleHttpConnectionsPerHost);
+        }
+
         public AlternatorConfigBuilder withConnectionMaxIdleTimeMs(long connectionMaxIdleTimeMs)
         {
             return this.WithConnectionMaxIdleTimeMs(connectionMaxIdleTimeMs);
+        }
+
+        public AlternatorConfigBuilder withIdleHttpConnectionTimeoutMs(long idleHttpConnectionTimeoutMs)
+        {
+            return this.WithIdleHttpConnectionTimeoutMs(idleHttpConnectionTimeoutMs);
         }
 
         public AlternatorConfigBuilder withConnectionTimeToLiveMs(long connectionTimeToLiveMs)
@@ -401,6 +439,11 @@ namespace ScyllaDB.Alternator
         public AlternatorConfigBuilder withConnectionTimeoutMs(long connectionTimeoutMs)
         {
             return this.WithConnectionTimeoutMs(connectionTimeoutMs);
+        }
+
+        public AlternatorConfigBuilder withHttpClientTimeoutMs(long httpClientTimeoutMs)
+        {
+            return this.WithHttpClientTimeoutMs(httpClientTimeoutMs);
         }
 
         public AlternatorConfig build()
@@ -468,6 +511,7 @@ namespace ScyllaDB.Alternator
                 this.connectionTimeToLiveMs,
                 this.connectionAcquisitionTimeoutMs,
                 this.connectionTimeoutMs,
+                this.httpClientTimeoutMs,
                 effectiveTlsConfig);
         }
 
@@ -523,6 +567,13 @@ namespace ScyllaDB.Alternator
                 throw new ArgumentException(
                     "connectionTimeoutMs must be non-negative, but was: " + this.connectionTimeoutMs,
                     nameof(this.connectionTimeoutMs));
+            }
+
+            if (this.httpClientTimeoutMs < 0)
+            {
+                throw new ArgumentException(
+                    "httpClientTimeoutMs must be non-negative, but was: " + this.httpClientTimeoutMs,
+                    nameof(this.httpClientTimeoutMs));
             }
         }
 

@@ -375,9 +375,27 @@ namespace ScyllaDB.Alternator
             return this;
         }
 
+        public AlternatorDynamoDBClientBuilder WithMaxIdleHttpConnections(int maxIdleHttpConnections)
+        {
+            this.configBuilder.WithMaxIdleHttpConnections(maxIdleHttpConnections);
+            return this;
+        }
+
+        public AlternatorDynamoDBClientBuilder WithMaxIdleHttpConnectionsPerHost(int maxIdleHttpConnectionsPerHost)
+        {
+            this.configBuilder.WithMaxIdleHttpConnectionsPerHost(maxIdleHttpConnectionsPerHost);
+            return this;
+        }
+
         public AlternatorDynamoDBClientBuilder WithConnectionMaxIdleTimeMs(long connectionMaxIdleTimeMs)
         {
             this.configBuilder.WithConnectionMaxIdleTimeMs(connectionMaxIdleTimeMs);
+            return this;
+        }
+
+        public AlternatorDynamoDBClientBuilder WithIdleHttpConnectionTimeoutMs(long idleHttpConnectionTimeoutMs)
+        {
+            this.configBuilder.WithIdleHttpConnectionTimeoutMs(idleHttpConnectionTimeoutMs);
             return this;
         }
 
@@ -396,6 +414,12 @@ namespace ScyllaDB.Alternator
         public AlternatorDynamoDBClientBuilder WithConnectionTimeoutMs(long connectionTimeoutMs)
         {
             this.configBuilder.WithConnectionTimeoutMs(connectionTimeoutMs);
+            return this;
+        }
+
+        public AlternatorDynamoDBClientBuilder WithHttpClientTimeoutMs(long httpClientTimeoutMs)
+        {
+            this.configBuilder.WithHttpClientTimeoutMs(httpClientTimeoutMs);
             return this;
         }
 
@@ -731,9 +755,24 @@ namespace ScyllaDB.Alternator
             return this.WithMaxConnections(maxConnections);
         }
 
+        public AlternatorDynamoDBClientBuilder withMaxIdleHttpConnections(int maxIdleHttpConnections)
+        {
+            return this.WithMaxIdleHttpConnections(maxIdleHttpConnections);
+        }
+
+        public AlternatorDynamoDBClientBuilder withMaxIdleHttpConnectionsPerHost(int maxIdleHttpConnectionsPerHost)
+        {
+            return this.WithMaxIdleHttpConnectionsPerHost(maxIdleHttpConnectionsPerHost);
+        }
+
         public AlternatorDynamoDBClientBuilder withConnectionMaxIdleTimeMs(long connectionMaxIdleTimeMs)
         {
             return this.WithConnectionMaxIdleTimeMs(connectionMaxIdleTimeMs);
+        }
+
+        public AlternatorDynamoDBClientBuilder withIdleHttpConnectionTimeoutMs(long idleHttpConnectionTimeoutMs)
+        {
+            return this.WithIdleHttpConnectionTimeoutMs(idleHttpConnectionTimeoutMs);
         }
 
         public AlternatorDynamoDBClientBuilder withConnectionTimeToLiveMs(long connectionTimeToLiveMs)
@@ -749,6 +788,11 @@ namespace ScyllaDB.Alternator
         public AlternatorDynamoDBClientBuilder withConnectionTimeoutMs(long connectionTimeoutMs)
         {
             return this.WithConnectionTimeoutMs(connectionTimeoutMs);
+        }
+
+        public AlternatorDynamoDBClientBuilder withHttpClientTimeoutMs(long httpClientTimeoutMs)
+        {
+            return this.WithHttpClientTimeoutMs(httpClientTimeoutMs);
         }
 
         public AlternatorDynamoDBClientBuilder withDisableCertificateChecks()
@@ -883,7 +927,8 @@ namespace ScyllaDB.Alternator
                 .WithConnectionMaxIdleTimeMs(config.ConnectionMaxIdleTimeMs)
                 .WithConnectionTimeToLiveMs(config.ConnectionTimeToLiveMs)
                 .WithConnectionAcquisitionTimeoutMs(config.ConnectionAcquisitionTimeoutMs)
-                .WithConnectionTimeoutMs(config.ConnectionTimeoutMs);
+                .WithConnectionTimeoutMs(config.ConnectionTimeoutMs)
+                .WithHttpClientTimeoutMs(config.HttpClientTimeoutMs);
 
             config.CopyHeaderOptimizationTo(builder);
             return builder.Build();
@@ -938,9 +983,9 @@ namespace ScyllaDB.Alternator
                     this.options.CancellationToken)
                 : new Helper(alternatorConfig, this.validateOnInitialization, this.startImmediately, this.cancellationToken);
 
-            if (alternatorConfig.ConnectionTimeoutMs > 0)
+            if (alternatorConfig.HttpClientTimeoutMs > 0)
             {
-                dynamoDbConfig.Timeout = TimeSpan.FromMilliseconds(alternatorConfig.ConnectionTimeoutMs);
+                dynamoDbConfig.Timeout = TimeSpan.FromMilliseconds(alternatorConfig.HttpClientTimeoutMs);
             }
 
             dynamoDbConfig.MaxConnectionsPerServer = alternatorConfig.MaxConnections;
@@ -1097,7 +1142,8 @@ namespace ScyllaDB.Alternator
                 .WithConnectionMaxIdleTimeMs(config.ConnectionMaxIdleTimeMs)
                 .WithConnectionTimeToLiveMs(config.ConnectionTimeToLiveMs)
                 .WithConnectionAcquisitionTimeoutMs(config.ConnectionAcquisitionTimeoutMs)
-                .WithConnectionTimeoutMs(config.ConnectionTimeoutMs);
+                .WithConnectionTimeoutMs(config.ConnectionTimeoutMs)
+                .WithHttpClientTimeoutMs(config.HttpClientTimeoutMs);
             config.CopyHeaderOptimizationTo(this.configBuilder);
         }
 

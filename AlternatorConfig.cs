@@ -17,6 +17,7 @@ namespace ScyllaDB.Alternator
         public const long DefaultConnectionTimeToLiveMs = 0;
         public const long DefaultConnectionAcquisitionTimeoutMs = 10000;
         public const long DefaultConnectionTimeoutMs = 15000;
+        public const long DefaultHttpClientTimeoutMs = DefaultConnectionTimeoutMs;
         public const int RecommendedPartitionKeyDiscoveryMaxRetries = 3;
         public const long RecommendedPartitionKeyDiscoveryInitialDelayMs = 100;
         public const long RecommendedPartitionKeyDiscoveryMaxDelayMs = 2000;
@@ -31,6 +32,7 @@ namespace ScyllaDB.Alternator
         public const long DEFAULT_CONNECTION_TIME_TO_LIVE_MS = DefaultConnectionTimeToLiveMs;
         public const long DEFAULT_CONNECTION_ACQUISITION_TIMEOUT_MS = DefaultConnectionAcquisitionTimeoutMs;
         public const long DEFAULT_CONNECTION_TIMEOUT_MS = DefaultConnectionTimeoutMs;
+        public const long DEFAULT_HTTP_CLIENT_TIMEOUT_MS = DefaultHttpClientTimeoutMs;
         public const int RECOMMENDED_PARTITION_KEY_DISCOVERY_MAX_RETRIES = RecommendedPartitionKeyDiscoveryMaxRetries;
         public const long RECOMMENDED_PARTITION_KEY_DISCOVERY_INITIAL_DELAY_MS = RecommendedPartitionKeyDiscoveryInitialDelayMs;
         public const long RECOMMENDED_PARTITION_KEY_DISCOVERY_MAX_DELAY_MS = RecommendedPartitionKeyDiscoveryMaxDelayMs;
@@ -99,6 +101,7 @@ namespace ScyllaDB.Alternator
             long connectionTimeToLiveMs,
             long connectionAcquisitionTimeoutMs,
             long connectionTimeoutMs,
+            long httpClientTimeoutMs,
             TlsConfig tlsConfig)
         {
             this.SeedHosts = seedHosts.AsReadOnly();
@@ -122,6 +125,7 @@ namespace ScyllaDB.Alternator
             this.ConnectionTimeToLiveMs = connectionTimeToLiveMs;
             this.ConnectionAcquisitionTimeoutMs = connectionAcquisitionTimeoutMs;
             this.ConnectionTimeoutMs = connectionTimeoutMs;
+            this.HttpClientTimeoutMs = httpClientTimeoutMs;
             this.TlsConfig = tlsConfig;
             this.HeadersWhitelist = this.CreateHeadersWhitelist(headersWhitelist, customOptimizeHeaders);
         }
@@ -163,6 +167,8 @@ namespace ScyllaDB.Alternator
         public long ConnectionAcquisitionTimeoutMs { get; }
 
         public long ConnectionTimeoutMs { get; }
+
+        public long HttpClientTimeoutMs { get; }
 
         public TlsConfig TlsConfig { get; }
 
@@ -304,6 +310,11 @@ namespace ScyllaDB.Alternator
         public long getConnectionTimeoutMs()
         {
             return this.ConnectionTimeoutMs;
+        }
+
+        public long getHttpClientTimeoutMs()
+        {
+            return this.HttpClientTimeoutMs;
         }
 
         public IReadOnlySet<string> getRequiredHeaders()
