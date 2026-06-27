@@ -355,7 +355,7 @@ AmazonDynamoDBClient client = AlternatorDynamoDBClient.builder()
 
 ## User-Agent
 
-By default, the client appends a ScyllaDB Alternator token to the AWS SDK user-agent. The builder can replace, transform, or remove the final user-agent.
+By default, the client preserves the AWS SDK user-agent and appends a ScyllaDB Alternator token. The builder can replace, transform, append to, or remove the final user-agent.
 
 ```csharp
 AmazonDynamoDBClient client = AlternatorDynamoDBClient.builder()
@@ -363,6 +363,8 @@ AmazonDynamoDBClient client = AlternatorDynamoDBClient.builder()
     .withUserAgent(userAgent => userAgent + " my-app/1.0")
     .build();
 ```
+
+Use `withUserAgent("custom/1.0")` to replace the final value. Use `withUserAgent(userAgent => ...)` to transform the current composed value. Use `withoutUserAgent()` to remove it; header optimization then no longer requires the `User-Agent` header.
 
 ```csharp
 AmazonDynamoDBClient client = AlternatorDynamoDBClient.builder()
