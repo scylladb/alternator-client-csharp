@@ -121,6 +121,35 @@ AmazonDynamoDBClient client = AlternatorDynamoDBClient.Create(
     rack: "rack1");
 ```
 
+## Node Health
+
+Node health is enabled by default. Nodes move between active, quarantined, and
+down states based on request outcomes. Down nodes are skipped for normal routing,
+quarantined nodes receive limited recovery traffic, and long-running HTTP 5xx
+responses can be treated as server-side request timeouts rather than node
+failures.
+
+Tune health behavior by building a node-health config and passing it once to the
+client builder:
+
+```csharp
+var nodeHealth = NodeHealthStoreConfig.builder()
+    .withConsecutiveServerErrorThreshold(10)
+    .withQuarantineSuccessThreshold(10)
+    .withQuarantinedNodeSamplingInterval(10)
+    .withDownNodeProbePeriodMs(30000)
+    .withServerRequestTimeoutThresholdMs(9000)
+    .build();
+
+AmazonDynamoDBClient client = AlternatorDynamoDBClient.builder()
+    .endpointOverride("http://127.0.0.1:8000")
+    .withNodeHealth(nodeHealth)
+    .build();
+```
+
+Use `disabled()` on the node-health config builder to keep all known nodes in the
+active set.
+
 ## HTTP Client Configuration
 
 The .NET SDK uses `AmazonDynamoDBConfig.HttpClientFactory` for transport customization. The Alternator builder configures an internal factory so TLS, header filtering, compression, connection pool tuning, and endpoint routing stay active.

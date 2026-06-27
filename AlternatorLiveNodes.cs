@@ -25,9 +25,13 @@ namespace ScyllaDB.Alternator
         private readonly AlternatorConfig config;
         private readonly HttpClient pollingHttpClient;
         private readonly bool ownsPollingHttpClient;
+        private readonly NodeHealthStore healthStore;
         private List<Uri> liveNodes;
         private int nextLiveNodeIndex;
+        private int nextQuarantinedNodeIndex;
+        private int nextQuarantineTrafficSequence;
         private long lastActivityTicks;
+        private long lastDownNodeProbeTicks;
         private bool started;
         private CancellationTokenSource? refreshCancellation;
         private Task? refreshTask;
@@ -112,6 +116,8 @@ namespace ScyllaDB.Alternator
             {
                 this.liveNodes.Add(node);
             }
+
+            this.healthStore = new NodeHealthStore(this.config.NodeHealth, this.initialNodes);
 
             try
             {
@@ -235,15 +241,27 @@ namespace ScyllaDB.Alternator
         public Uri NextAsUri()
         {
             this.MarkActivity();
-            var nodes = this.GetLiveNodes();
-            if (nodes.Count == 0)
+            var activeNodes = this.GetActiveNodesInternal();
+            if (activeNodes.Count == 0)
+            {
+                this.ProbeDownNodesOnce(CancellationToken.None);
+                activeNodes = this.GetActiveNodesInternal();
+            }
+
+            var quarantinedNode = this.SelectQuarantinedNode(activeNodes.Count == 0);
+            if (quarantinedNode != null)
+            {
+                return quarantinedNode;
+            }
+
+            if (activeNodes.Count == 0)
             {
                 throw new InvalidOperationException("No live nodes available");
             }
 
             var sequence = Interlocked.Increment(ref this.nextLiveNodeIndex) - 1;
-            var index = (int)(((sequence % nodes.Count) + nodes.Count) % nodes.Count);
-            return nodes[index];
+            var index = Mod(sequence, activeNodes.Count);
+            return activeNodes[index];
         }
 
         public IReadOnlyList<Uri> GetLiveNodes()
@@ -267,6 +285,26 @@ namespace ScyllaDB.Alternator
         public IReadOnlyList<Uri> GetQuarantinedNodes()
         {
             return this.GetQuarantinedNodesInternal().ToList().AsReadOnly();
+        }
+
+        public IReadOnlyList<Uri> GetDownNodes()
+        {
+            return this.GetDownNodesInternal().ToList().AsReadOnly();
+        }
+
+        public NodeHealthStatus? GetNodeStatus(Uri node)
+        {
+            return this.healthStore.GetNodeStatus(node);
+        }
+
+        public void ReportNodeResult(Uri node, NodeHealthObservation observation)
+        {
+            this.healthStore.ReportNodeResult(node, observation);
+        }
+
+        public Task<IReadOnlyList<Uri>> ProbeDownNodesAsync(CancellationToken cancellationToken = default)
+        {
+            return this.healthStore.ProbeDownNodesAsync(this.ProbeNodeAsync, cancellationToken);
         }
 
         public Uri NextAsUri(string? path, string? query)
@@ -429,18 +467,43 @@ namespace ScyllaDB.Alternator
         {
             return this.GetQuarantinedNodes();
         }
+
+        public IReadOnlyList<Uri> getDownNodes()
+        {
+            return this.GetDownNodes();
+        }
+
+        public NodeHealthStatus? getNodeStatus(Uri node)
+        {
+            return this.GetNodeStatus(node);
+        }
+
+        public void reportNodeResult(Uri node, NodeHealthObservation observation)
+        {
+            this.ReportNodeResult(node, observation);
+        }
+
+        public Task<IReadOnlyList<Uri>> probeDownNodesAsync()
+        {
+            return this.ProbeDownNodesAsync();
+        }
 #pragma warning restore SA1300, IDE1006
 
         internal Uri GetNodeForHash(long hash)
         {
             this.MarkActivity();
-            var nodes = this.GetLiveNodes();
+            var nodes = this.GetActiveNodesInternal();
+            if (nodes.Count == 0)
+            {
+                nodes = this.GetQuarantinedNodesInternal();
+            }
+
             if (nodes.Count == 0)
             {
                 throw new InvalidOperationException("No live nodes available");
             }
 
-            var index = (int)(((hash % nodes.Count) + nodes.Count) % nodes.Count);
+            var index = Mod(hash, nodes.Count);
             return nodes[index];
         }
 
@@ -477,12 +540,17 @@ namespace ScyllaDB.Alternator
 
         protected internal virtual IReadOnlyList<Uri> GetActiveNodesInternal()
         {
-            return this.GetLiveNodesInternal();
+            return this.healthStore.GetActiveNodes();
         }
 
         protected internal virtual IReadOnlyList<Uri> GetQuarantinedNodesInternal()
         {
-            return Array.Empty<Uri>();
+            return this.healthStore.GetQuarantinedNodes();
+        }
+
+        protected internal virtual IReadOnlyList<Uri> GetDownNodesInternal()
+        {
+            return this.healthStore.GetDownNodes();
         }
 
 #pragma warning disable SA1300, IDE1006
@@ -499,6 +567,11 @@ namespace ScyllaDB.Alternator
         protected internal virtual IReadOnlyList<Uri> getQuarantinedNodesInternal()
         {
             return this.GetQuarantinedNodesInternal();
+        }
+
+        protected internal virtual IReadOnlyList<Uri> getDownNodesInternal()
+        {
+            return this.GetDownNodesInternal();
         }
 #pragma warning restore SA1300, IDE1006
 
@@ -532,7 +605,8 @@ namespace ScyllaDB.Alternator
                 .WithConnectionTimeToLiveMs(config.ConnectionTimeToLiveMs)
                 .WithConnectionAcquisitionTimeoutMs(config.ConnectionAcquisitionTimeoutMs)
                 .WithConnectionTimeoutMs(config.ConnectionTimeoutMs)
-                .WithHttpClientTimeoutMs(config.HttpClientTimeoutMs);
+                .WithHttpClientTimeoutMs(config.HttpClientTimeoutMs)
+                .WithNodeHealth(config.NodeHealth);
 
             config.CopyHeaderOptimizationTo(builder);
             return builder.Build();
@@ -563,6 +637,11 @@ namespace ScyllaDB.Alternator
             }
 
             return builder.Uri;
+        }
+
+        private static int Mod(long value, int divisor)
+        {
+            return (int)(((value % divisor) + divisor) % divisor);
         }
 
         private static AlternatorConfig CreateLegacyConfig(
@@ -617,6 +696,7 @@ namespace ScyllaDB.Alternator
                     try
                     {
                         this.UpdateLiveNodes();
+                        this.ProbeDownNodesIfDue(cancellationToken);
                     }
                     catch (IOException e)
                     {
@@ -683,8 +763,15 @@ namespace ScyllaDB.Alternator
         private void SetLiveNodes(List<Uri> nodes)
         {
             this.liveNodesLock.EnterWriteLock();
-            this.liveNodes = nodes;
-            this.liveNodesLock.ExitWriteLock();
+            try
+            {
+                this.liveNodes = nodes;
+                this.healthStore.SetKnownNodes(nodes);
+            }
+            finally
+            {
+                this.liveNodesLock.ExitWriteLock();
+            }
         }
 
         private void UpdateLiveNodes()
@@ -784,40 +871,142 @@ namespace ScyllaDB.Alternator
             using var request = new HttpRequestMessage(HttpMethod.Get, uri);
             request.Headers.Host = uri.Authority;
             request.Headers.Connection.Add("keep-alive");
-            using var response = this.pollingHttpClient.SendAsync(request).Result;
-            if (!response.IsSuccessStatusCode)
+            var started = Stopwatch.GetTimestamp();
+            HttpResponseMessage response;
+            try
             {
-                return new List<Uri>();
+                response = this.pollingHttpClient.SendAsync(request).Result;
+            }
+            catch (Exception)
+            {
+                this.ReportNodeResult(uri, NodeHealthObservation.ConnectionFailure);
+                throw;
             }
 
-            var responseBody = StreamToString(response.Content.ReadAsStreamAsync().Result);
-            var list = JsonSerializer.Deserialize<List<string>>(responseBody) ?? new List<string>();
-            var newHosts = new List<Uri>();
-            foreach (var host in list)
+            using (response)
             {
-                if (string.IsNullOrEmpty(host))
+                this.ReportNodeResult(
+                    uri,
+                    NodeHealthReportingHttpMessageHandler.ObservationFromResponse(
+                        response,
+                        Stopwatch.GetElapsedTime(started),
+                        this.config.NodeHealth));
+
+                if (!response.IsSuccessStatusCode)
                 {
-                    continue;
+                    return new List<Uri>();
                 }
 
-                var trimmedHost = host.Trim();
-                try
+                var responseBody = StreamToString(response.Content.ReadAsStreamAsync().Result);
+                var list = JsonSerializer.Deserialize<List<string>>(responseBody) ?? new List<string>();
+                var newHosts = new List<Uri>();
+                foreach (var host in list)
                 {
-                    newHosts.Add(this.HostToUri(trimmedHost));
+                    if (string.IsNullOrEmpty(host))
+                    {
+                        continue;
+                    }
+
+                    var trimmedHost = host.Trim();
+                    try
+                    {
+                        newHosts.Add(this.HostToUri(trimmedHost));
+                    }
+                    catch (UriFormatException e)
+                    {
+                        Logger.Error(e, $"Invalid host: {trimmedHost}");
+                    }
                 }
-                catch (UriFormatException e)
-                {
-                    Logger.Error(e, $"Invalid host: {trimmedHost}");
-                }
+
+                return newHosts;
             }
-
-            return newHosts;
         }
 
         private Uri NextAsLocalNodesUri()
         {
             var query = this.config.RoutingScope.LocalNodesQuery;
             return this.NextAsUri("/localnodes", string.IsNullOrEmpty(query) ? null : query);
+        }
+
+        private Uri? SelectQuarantinedNode(bool activeNodesEmpty)
+        {
+            var quarantinedNodes = this.GetQuarantinedNodesInternal();
+            if (quarantinedNodes.Count == 0)
+            {
+                return null;
+            }
+
+            if (!activeNodesEmpty)
+            {
+                var trafficSequence = Interlocked.Increment(ref this.nextQuarantineTrafficSequence);
+                if (Mod(trafficSequence, this.config.NodeHealth.QuarantinedNodeSamplingInterval) != 0)
+                {
+                    return null;
+                }
+            }
+
+            var sequence = Interlocked.Increment(ref this.nextQuarantinedNodeIndex) - 1;
+            return quarantinedNodes[Mod(sequence, quarantinedNodes.Count)];
+        }
+
+        private void ProbeDownNodesOnce(CancellationToken cancellationToken)
+        {
+            try
+            {
+                this.ProbeDownNodesAsync(cancellationToken).GetAwaiter().GetResult();
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+            }
+        }
+
+        private void ProbeDownNodesIfDue(CancellationToken cancellationToken)
+        {
+            if (this.config.NodeHealth.Disabled || this.GetDownNodesInternal().Count == 0)
+            {
+                return;
+            }
+
+            var now = DateTimeOffset.UtcNow.Ticks;
+            var lastProbe = Interlocked.Read(ref this.lastDownNodeProbeTicks);
+            var probePeriod = TimeSpan.FromMilliseconds(this.config.NodeHealth.DownNodeProbePeriodMs);
+            if (lastProbe != 0 && new DateTimeOffset(now, TimeSpan.Zero) - new DateTimeOffset(lastProbe, TimeSpan.Zero) < probePeriod)
+            {
+                return;
+            }
+
+            Interlocked.Exchange(ref this.lastDownNodeProbeTicks, now);
+            this.ProbeDownNodesOnce(cancellationToken);
+        }
+
+        private async Task<NodeHealthObservation?> ProbeNodeAsync(
+            Uri node,
+            NodeHealthStatus status,
+            CancellationToken cancellationToken)
+        {
+            var query = this.config.RoutingScope.LocalNodesQuery;
+            var requestQuery = string.IsNullOrEmpty(query) ? null : query;
+            var uri = BuildUri(node, "/localnodes", requestQuery);
+            using var request = new HttpRequestMessage(HttpMethod.Get, uri);
+            request.Headers.Host = uri.Authority;
+            request.Headers.Connection.Add("keep-alive");
+            var started = Stopwatch.GetTimestamp();
+            try
+            {
+                using var response = await this.pollingHttpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+                return NodeHealthReportingHttpMessageHandler.ObservationFromResponse(
+                    response,
+                    Stopwatch.GetElapsedTime(started),
+                    this.config.NodeHealth);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                return null;
+            }
+            catch (Exception)
+            {
+                return NodeHealthObservation.ConnectionFailure;
+            }
         }
 
         private List<Uri> MergeWithInitialNodes(IEnumerable<Uri> nodes)

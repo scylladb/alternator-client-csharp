@@ -13,15 +13,18 @@ namespace ScyllaDB.Alternator
     internal sealed class AlternatorHttpClientFactory : HttpClientFactory
     {
         private readonly AlternatorConfig config;
+        private readonly AlternatorLiveNodes? liveNodes;
         private readonly Action<HttpClientHandler>? configureHttpClientHandler;
         private readonly Action<SocketsHttpHandler>? configureSocketsHttpHandler;
 
         internal AlternatorHttpClientFactory(
             AlternatorConfig config,
+            AlternatorLiveNodes? liveNodes = null,
             Action<HttpClientHandler>? configureHttpClientHandler = null,
             Action<SocketsHttpHandler>? configureSocketsHttpHandler = null)
         {
             this.config = config;
+            this.liveNodes = liveNodes;
             this.configureHttpClientHandler = configureHttpClientHandler;
             this.configureSocketsHttpHandler = configureSocketsHttpHandler;
         }
@@ -32,6 +35,11 @@ namespace ScyllaDB.Alternator
                 this.config,
                 this.configureHttpClientHandler,
                 this.configureSocketsHttpHandler);
+            if (this.liveNodes != null)
+            {
+                handler = new NodeHealthReportingHttpMessageHandler(handler, this.liveNodes, this.config.NodeHealth);
+            }
+
             if (this.config.OptimizeHeaders)
             {
                 handler = new HeadersFilteringHttpMessageHandler(handler, this.config.HeadersWhitelist);
