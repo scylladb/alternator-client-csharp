@@ -37,6 +37,7 @@ namespace ScyllaDB.Alternator
         private long connectionTimeoutMs = AlternatorConfig.DefaultConnectionTimeoutMs;
         private long httpClientTimeoutMs = AlternatorConfig.DefaultHttpClientTimeoutMs;
         private TlsConfig? tlsConfig;
+        private NodeHealthStoreConfig nodeHealth = new NodeHealthStoreConfig();
 
         public AlternatorConfigBuilder WithSeedNode(Uri? seedUri)
         {
@@ -270,6 +271,12 @@ namespace ScyllaDB.Alternator
             return this;
         }
 
+        public AlternatorConfigBuilder WithNodeHealth(NodeHealthStoreConfig? config)
+        {
+            this.nodeHealth = NodeHealthStoreConfig.Normalize(config);
+            return this;
+        }
+
 #pragma warning disable SA1300, IDE1006
         public AlternatorConfigBuilder withSeedNode(Uri? seedUri)
         {
@@ -446,6 +453,11 @@ namespace ScyllaDB.Alternator
             return this.WithHttpClientTimeoutMs(httpClientTimeoutMs);
         }
 
+        public AlternatorConfigBuilder withNodeHealth(NodeHealthStoreConfig? config)
+        {
+            return this.WithNodeHealth(config);
+        }
+
         public AlternatorConfig build()
         {
             return this.Build();
@@ -512,7 +524,8 @@ namespace ScyllaDB.Alternator
                 this.connectionAcquisitionTimeoutMs,
                 this.connectionTimeoutMs,
                 this.httpClientTimeoutMs,
-                effectiveTlsConfig);
+                effectiveTlsConfig,
+                this.nodeHealth);
         }
 
         private TlsConfig CreateEffectiveTlsConfig()
