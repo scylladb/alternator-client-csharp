@@ -44,6 +44,10 @@ src/**/packages
 
 # Rider
 .idea/
+*.DotSettings.user
+
+# VS Code
+.vscode/
 
 # Visual Studio for Mac
 *.userprefs
@@ -58,4 +62,3 @@ build/scylladb.snk
 nupkgs/
 IntegrationTests/scylla/*.crt
 IntegrationTests/scylla/*.key
-
