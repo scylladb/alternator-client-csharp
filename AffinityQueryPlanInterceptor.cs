@@ -166,30 +166,18 @@ namespace ScyllaDB.Alternator
                 }
             }
 
-            var selectedNode = this.SelectBatchWritePreferredNode(votes);
-            return selectedNode == null ? null : this.LiveNodes.CreateQueryPlan(new[] { selectedNode });
+            var preferredNodes = this.SelectBatchWritePreferredNodes(votes);
+            return preferredNodes.Count == 0 ? null : this.LiveNodes.CreateQueryPlan(preferredNodes);
         }
 
-        private Uri? SelectBatchWritePreferredNode(IReadOnlyDictionary<Uri, int> votes)
+        private IReadOnlyList<Uri> SelectBatchWritePreferredNodes(IReadOnlyDictionary<Uri, int> votes)
         {
-            Uri? preferredNode = null;
-            var preferredVotes = 0;
-            var tied = false;
-            foreach (var vote in votes)
-            {
-                if (vote.Value > preferredVotes)
-                {
-                    preferredNode = vote.Key;
-                    preferredVotes = vote.Value;
-                    tied = false;
-                }
-                else if (vote.Value == preferredVotes)
-                {
-                    tied = true;
-                }
-            }
-
-            return preferredNode == null || tied ? null : preferredNode;
+            return votes
+                .Where(vote => vote.Value > 0)
+                .OrderByDescending(vote => vote.Value)
+                .ThenBy(vote => vote.Key.ToString(), StringComparer.Ordinal)
+                .Select(vote => vote.Key)
+                .ToArray();
         }
     }
 }
