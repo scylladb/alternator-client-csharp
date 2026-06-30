@@ -5,12 +5,17 @@
 namespace ScyllaDB.Alternator
 {
     using System.IO.Compression;
+    using System.Net;
     using System.Net.Security;
+    using System.Net.Sockets;
     using System.Security.Cryptography;
     using System.Security.Cryptography.X509Certificates;
+    using System.Text;
+    using Amazon.DynamoDBv2;
     using Amazon.DynamoDBv2.Model;
     using Amazon.Runtime;
     using Amazon.Runtime.Internal;
+    using ScyllaDB.Alternator.Routing;
 
     [TestFixture]
     [Category("Unit")]
@@ -155,6 +160,63 @@ namespace ScyllaDB.Alternator
             Assert.That(handler.PooledConnectionIdleTimeout, Is.EqualTo(TimeSpan.FromMilliseconds(83000)));
             Assert.That(handler.PooledConnectionLifetime, Is.EqualTo(TimeSpan.FromMilliseconds(84000)));
             Assert.That(handler.ConnectTimeout, Is.EqualTo(TimeSpan.FromMilliseconds(85000)));
+        }
+
+        [Test]
+        public async Task DiscoveryPollingReusesConnectionAfterRepeatedNonSuccessResponsesTest()
+        {
+            using var server = new CountingKeepAliveHttpServer(new[]
+            {
+                new TestHttpResponse(HttpStatusCode.InternalServerError, "{\"error\":\"temporary\"}"),
+                new TestHttpResponse(HttpStatusCode.ServiceUnavailable, "{\"error\":\"busy\"}"),
+                new TestHttpResponse(HttpStatusCode.OK, "[\"127.0.0.1\"]"),
+            });
+            var config = AlternatorConfig.builder()
+                .withSeedNode(server.BaseUri)
+                .withRoutingScope(ClusterScope.create())
+                .build();
+            var liveNodes = new AlternatorLiveNodes(config);
+
+            InvokeUpdateLiveNodes(liveNodes);
+            InvokeUpdateLiveNodes(liveNodes);
+            InvokeUpdateLiveNodes(liveNodes);
+            await server.WaitAsync().ConfigureAwait(false);
+
+            Assert.That(server.RequestCount, Is.EqualTo(3));
+            Assert.That(server.AcceptCount, Is.EqualTo(1));
+            Assert.That(liveNodes.getLiveNodes(), Is.EqualTo(new[] { server.BaseUri }));
+        }
+
+        [Test]
+        public async Task DynamoDbClientReusesConnectionAfterRepeatedNonSuccessResponsesTest()
+        {
+            using var server = new CountingKeepAliveHttpServer(new[]
+            {
+                new TestHttpResponse(HttpStatusCode.BadRequest, "{\"__type\":\"ValidationException\",\"message\":\"bad\"}"),
+                new TestHttpResponse(HttpStatusCode.BadRequest, "{\"__type\":\"ValidationException\",\"message\":\"bad again\"}"),
+                new TestHttpResponse(HttpStatusCode.OK, "{\"TableNames\":[]}"),
+            });
+            using var client = AlternatorDynamoDBClient.builder()
+                .endpointOverride(server.BaseUri.ToString())
+                .withMaxConnections(1)
+                .ConfigureAws(config =>
+                {
+                    config.MaxErrorRetry = 0;
+                    config.Timeout = TimeSpan.FromSeconds(5);
+                })
+                .WithoutValidation()
+                .WithDeferredStart()
+                .build();
+
+            Assert.ThrowsAsync<AmazonDynamoDBException>(() => client.ListTablesAsync());
+            Assert.ThrowsAsync<AmazonDynamoDBException>(() => client.ListTablesAsync());
+            var result = await client.ListTablesAsync().ConfigureAwait(false);
+
+            await server.WaitAsync().ConfigureAwait(false);
+
+            Assert.That(result.TableNames, Is.Empty);
+            Assert.That(server.RequestCount, Is.EqualTo(3));
+            Assert.That(server.AcceptCount, Is.EqualTo(1));
         }
 
         [Test]
@@ -759,6 +821,194 @@ namespace ScyllaDB.Alternator
             Assert.That(method, Is.Not.Null);
             return (request, headers, transformer, appendDefaultToken) =>
                 method!.Invoke(null, new object?[] { request, headers, transformer, appendDefaultToken });
+        }
+
+        private static void InvokeUpdateLiveNodes(AlternatorLiveNodes liveNodes)
+        {
+            var method = typeof(AlternatorLiveNodes).GetMethod(
+                "UpdateLiveNodes",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+            Assert.That(method, Is.Not.Null);
+            method!.Invoke(liveNodes, Array.Empty<object>());
+        }
+
+        private sealed class TestHttpResponse
+        {
+            internal TestHttpResponse(HttpStatusCode statusCode, string body)
+            {
+                this.StatusCode = statusCode;
+                this.Body = body;
+            }
+
+            internal HttpStatusCode StatusCode { get; }
+
+            internal string Body { get; }
+        }
+
+        private sealed class CountingKeepAliveHttpServer : IDisposable
+        {
+            private readonly TcpListener listener;
+            private readonly IReadOnlyList<TestHttpResponse> responses;
+            private readonly CancellationTokenSource cancellation = new CancellationTokenSource();
+            private readonly Task worker;
+            private int acceptCount;
+            private int requestCount;
+            private bool disposed;
+
+            internal CountingKeepAliveHttpServer(IReadOnlyList<TestHttpResponse> responses)
+            {
+                this.responses = responses;
+                this.listener = new TcpListener(IPAddress.Loopback, 0);
+                this.listener.Start();
+                var endpoint = (IPEndPoint)this.listener.LocalEndpoint;
+                this.BaseUri = new Uri($"http://127.0.0.1:{endpoint.Port}/");
+                this.worker = Task.Run(this.RunAsync);
+            }
+
+            internal Uri BaseUri { get; }
+
+            internal int AcceptCount => Volatile.Read(ref this.acceptCount);
+
+            internal int RequestCount => Volatile.Read(ref this.requestCount);
+
+            public void Dispose()
+            {
+                if (this.disposed)
+                {
+                    return;
+                }
+
+                this.disposed = true;
+                this.cancellation.Cancel();
+                this.listener.Stop();
+                try
+                {
+                    this.worker.Wait(TimeSpan.FromSeconds(5));
+                }
+                catch (AggregateException exception) when (exception.InnerExceptions.All(IsExpectedShutdownException))
+                {
+                }
+
+                this.cancellation.Dispose();
+            }
+
+            internal async Task WaitAsync()
+            {
+                await this.worker.WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+            }
+
+            private static bool IsExpectedShutdownException(Exception exception)
+            {
+                return exception is OperationCanceledException || exception is ObjectDisposedException;
+            }
+
+            private static int FindHeaderEnd(List<byte> buffer)
+            {
+                for (var i = 3; i < buffer.Count; i++)
+                {
+                    if (buffer[i - 3] == '\r'
+                        && buffer[i - 2] == '\n'
+                        && buffer[i - 1] == '\r'
+                        && buffer[i] == '\n')
+                    {
+                        return i + 1;
+                    }
+                }
+
+                return -1;
+            }
+
+            private static async Task<bool> ReadRequestAsync(NetworkStream stream, CancellationToken cancellationToken)
+            {
+                var buffer = new List<byte>();
+                var chunk = new byte[256];
+                var headerEnd = -1;
+                while (headerEnd < 0)
+                {
+                    var read = await stream.ReadAsync(chunk, 0, chunk.Length, cancellationToken).ConfigureAwait(false);
+                    if (read == 0)
+                    {
+                        return false;
+                    }
+
+                    buffer.AddRange(chunk.Take(read));
+                    headerEnd = FindHeaderEnd(buffer);
+                }
+
+                var headerText = Encoding.ASCII.GetString(buffer.Take(headerEnd).ToArray());
+                var contentLength = 0;
+                foreach (var line in headerText.Split("\r\n", StringSplitOptions.None))
+                {
+                    if (line.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase)
+                        && int.TryParse(line["Content-Length:".Length..].Trim(), out var parsedLength))
+                    {
+                        contentLength = parsedLength;
+                    }
+                }
+
+                var remaining = contentLength - (buffer.Count - headerEnd);
+                while (remaining > 0)
+                {
+                    var read = await stream.ReadAsync(chunk, 0, Math.Min(chunk.Length, remaining), cancellationToken).ConfigureAwait(false);
+                    if (read == 0)
+                    {
+                        return false;
+                    }
+
+                    remaining -= read;
+                }
+
+                return true;
+            }
+
+            private static async Task WriteResponseAsync(
+                NetworkStream stream,
+                TestHttpResponse response,
+                bool keepAlive,
+                CancellationToken cancellationToken)
+            {
+                var body = Encoding.UTF8.GetBytes(response.Body);
+                var headers = Encoding.ASCII.GetBytes(
+                    $"HTTP/1.1 {(int)response.StatusCode} {response.StatusCode}\r\n" +
+                    "Content-Type: application/json\r\n" +
+                    $"Content-Length: {body.Length}\r\n" +
+                    $"Connection: {(keepAlive ? "keep-alive" : "close")}\r\n" +
+                    "\r\n");
+                await stream.WriteAsync(headers, 0, headers.Length, cancellationToken).ConfigureAwait(false);
+                await stream.WriteAsync(body, 0, body.Length, cancellationToken).ConfigureAwait(false);
+                await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            private async Task RunAsync()
+            {
+                try
+                {
+                    while (!this.cancellation.IsCancellationRequested && this.RequestCount < this.responses.Count)
+                    {
+                        using var client = await this.listener.AcceptTcpClientAsync(this.cancellation.Token).ConfigureAwait(false);
+                        Interlocked.Increment(ref this.acceptCount);
+                        using var stream = client.GetStream();
+                        while (!this.cancellation.IsCancellationRequested && this.RequestCount < this.responses.Count)
+                        {
+                            var hasRequest = await ReadRequestAsync(stream, this.cancellation.Token).ConfigureAwait(false);
+                            if (!hasRequest)
+                            {
+                                break;
+                            }
+
+                            var index = Interlocked.Increment(ref this.requestCount) - 1;
+                            await WriteResponseAsync(
+                                stream,
+                                this.responses[index],
+                                index + 1 < this.responses.Count,
+                                this.cancellation.Token).ConfigureAwait(false);
+                        }
+                    }
+                }
+                catch (Exception exception) when (this.cancellation.IsCancellationRequested && IsExpectedShutdownException(exception))
+                {
+                }
+            }
         }
 
         private sealed class UnseekableMemoryStream : MemoryStream
