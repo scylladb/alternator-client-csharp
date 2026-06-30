@@ -4,13 +4,17 @@ namespace ScyllaDB.Alternator
 
     public class FailedToCheck : Exception
     {
-        public FailedToCheck(string message, Exception cause)
-            : base(message, cause)
+        public FailedToCheck()
         {
         }
 
-        public FailedToCheck(string message)
+        public FailedToCheck(string? message)
             : base(message)
+        {
+        }
+
+        public FailedToCheck(string? message, Exception? innerException)
+            : base(message, innerException)
         {
         }
     }
