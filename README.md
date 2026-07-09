@@ -53,6 +53,28 @@ AmazonDynamoDBClient client = AlternatorDynamoDBClient.Builder()
     .Build();
 ```
 
+The AWS SDK for .NET still requires a region in `AmazonDynamoDBConfig` even
+when `EndpointOverride` sends requests to Alternator instead of an AWS DynamoDB
+regional endpoint. Alternator does not use this value for routing; the client
+discovers nodes through `/localnodes` and pipeline handlers choose live
+Alternator endpoints. The builder sets `RegionEndpoint.USEast1` when no region
+is provided so SDK configuration, signing, and client construction have a stable
+default.
+
+If that placeholder would be misleading in tracing, logging, metrics, or debug
+output, set the deployment or Scylla Cloud region explicitly:
+
+```csharp
+AmazonDynamoDBClient client = AlternatorDynamoDBClient.builder()
+    .endpointOverride("http://127.0.0.1:8000")
+    .region("eu-central-1")
+    .credentialsProvider(credentials)
+    .build();
+```
+
+The region value affects AWS SDK metadata and signing scope only; it does not
+change Alternator node discovery or load balancing.
+
 ## Alternator API Wrapper
 
 Use `buildWithAlternatorAPI()` when the application also needs Alternator-specific state, such as the live-node view.
