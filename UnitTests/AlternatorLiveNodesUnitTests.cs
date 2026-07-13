@@ -408,6 +408,7 @@ namespace ScyllaDB.Alternator
             var liveNodes = new AlternatorLiveNodes(config, pollingHttpClient);
 
             liveNodes.start().Wait(TimeSpan.FromSeconds(5));
+            liveNodes.nextAsURI();
             Assert.That(
                 SpinWait.SpinUntil(() => handler.SendCount > 0, TimeSpan.FromSeconds(5)),
                 Is.True);
@@ -436,6 +437,10 @@ namespace ScyllaDB.Alternator
 
             var runTask = Task.Run(() => liveNodes.run());
             Assert.That(
+                SpinWait.SpinUntil(() => liveNodes.isRunning(), TimeSpan.FromSeconds(5)),
+                Is.True);
+            liveNodes.nextAsURI();
+            Assert.That(
                 SpinWait.SpinUntil(() => handler.SendCount > 0, TimeSpan.FromSeconds(5)),
                 Is.True);
             Assert.That(liveNodes.isRunning(), Is.True);
@@ -446,6 +451,91 @@ namespace ScyllaDB.Alternator
             Assert.That(liveNodes.isRunning(), Is.False);
             Assert.That(handler.DisposeCount, Is.EqualTo(0));
             Assert.That(handler.SendCount, Is.GreaterThanOrEqualTo(1));
+        }
+
+        [Test]
+        public void StartDefersPollingUntilIdleRefreshIntervalTest()
+        {
+            var handler = new TrackingHttpMessageHandler();
+            using var pollingHttpClient = new HttpClient(handler);
+            var config = AlternatorConfig.builder()
+                .withSeedHost("127.0.0.1")
+                .withScheme("http")
+                .withPort(8080)
+                .withRoutingScope(ClusterScope.create())
+                .withActiveRefreshIntervalMs(10)
+                .withIdleRefreshIntervalMs(500)
+                .build();
+            var liveNodes = new AlternatorLiveNodes(config, pollingHttpClient);
+
+            liveNodes.start().Wait(TimeSpan.FromSeconds(5));
+            Thread.Sleep(100);
+            Assert.That(handler.SendCount, Is.EqualTo(0));
+            Assert.That(
+                SpinWait.SpinUntil(() => handler.SendCount == 1, TimeSpan.FromSeconds(5)),
+                Is.True);
+
+            liveNodes.shutdownAndWait();
+        }
+
+        [Test]
+        public void RequestSignalsDiscoveryBeforeIdleRefreshAndRateLimitsItTest()
+        {
+            var handler = new TrackingHttpMessageHandler();
+            using var pollingHttpClient = new HttpClient(handler);
+            var config = AlternatorConfig.builder()
+                .withSeedHost("127.0.0.1")
+                .withScheme("http")
+                .withPort(8080)
+                .withRoutingScope(ClusterScope.create())
+                .withActiveRefreshIntervalMs(200)
+                .withIdleRefreshIntervalMs(10000)
+                .build();
+            var liveNodes = new AlternatorLiveNodes(config, pollingHttpClient);
+
+            liveNodes.start().Wait(TimeSpan.FromSeconds(5));
+            liveNodes.nextAsURI();
+            Assert.That(
+                SpinWait.SpinUntil(() => handler.SendCount == 1, TimeSpan.FromSeconds(5)),
+                Is.True);
+            liveNodes.nextAsURI();
+            Thread.Sleep(100);
+            Assert.That(handler.SendCount, Is.EqualTo(1));
+
+            Assert.That(
+                SpinWait.SpinUntil(
+                    () =>
+                    {
+                        liveNodes.nextAsURI();
+                        return handler.SendCount == 2;
+                    },
+                    TimeSpan.FromSeconds(5)),
+                Is.True);
+
+            liveNodes.shutdownAndWait();
+        }
+
+        [Test]
+        public void NextAsUriStartsDeferredDiscoveryUpdaterTest()
+        {
+            var handler = new TrackingHttpMessageHandler();
+            using var pollingHttpClient = new HttpClient(handler);
+            var config = AlternatorConfig.builder()
+                .withSeedHost("127.0.0.1")
+                .withScheme("http")
+                .withPort(8080)
+                .withRoutingScope(ClusterScope.create())
+                .withActiveRefreshIntervalMs(10)
+                .withIdleRefreshIntervalMs(10000)
+                .build();
+            var liveNodes = new AlternatorLiveNodes(config, pollingHttpClient);
+
+            liveNodes.nextAsURI();
+            Assert.That(
+                SpinWait.SpinUntil(() => handler.SendCount == 1, TimeSpan.FromSeconds(5)),
+                Is.True);
+
+            liveNodes.shutdownAndWait();
         }
 
         [Test]

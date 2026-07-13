@@ -26,12 +26,14 @@ namespace ScyllaDB.Alternator
         private readonly HttpClient pollingHttpClient;
         private readonly bool ownsPollingHttpClient;
         private readonly NodeHealthStore healthStore;
+        private readonly object updateSignalLock = new object();
         private List<Uri> liveNodes;
         private int nextLiveNodeIndex;
         private int nextQuarantinedNodeIndex;
         private int nextQuarantineTrafficSequence;
-        private long lastActivityTicks;
+        private long nextRequestRefreshTicks;
         private long lastDownNodeProbeTicks;
+        private int updateRequested;
         private bool started;
         private CancellationTokenSource? refreshCancellation;
         private Task? refreshTask;
@@ -241,27 +243,7 @@ namespace ScyllaDB.Alternator
         public Uri NextAsUri()
         {
             this.MarkActivity();
-            var activeNodes = this.GetActiveNodesInternal();
-            if (activeNodes.Count == 0)
-            {
-                this.ProbeDownNodesOnce(CancellationToken.None);
-                activeNodes = this.GetActiveNodesInternal();
-            }
-
-            var quarantinedNode = this.SelectQuarantinedNode(activeNodes.Count == 0);
-            if (quarantinedNode != null)
-            {
-                return quarantinedNode;
-            }
-
-            if (activeNodes.Count == 0)
-            {
-                throw new InvalidOperationException("No live nodes available");
-            }
-
-            var sequence = Interlocked.Increment(ref this.nextLiveNodeIndex) - 1;
-            var index = Mod(sequence, activeNodes.Count);
-            return activeNodes[index];
+            return this.SelectNextUri();
         }
 
         public IReadOnlyList<Uri> GetLiveNodes()
@@ -345,7 +327,7 @@ namespace ScyllaDB.Alternator
 
         public bool CheckIfRoutingScopeFeatureIsSupported()
         {
-            var uri = this.NextAsUri("/localnodes", null);
+            var uri = this.NextAsUriWithoutRefresh("/localnodes", null);
             Uri fakeRackUrl;
             try
             {
@@ -489,9 +471,19 @@ namespace ScyllaDB.Alternator
         }
 #pragma warning restore SA1300, IDE1006
 
+        internal Uri NextAsUriWithoutRefresh()
+        {
+            return this.SelectNextUri();
+        }
+
+        internal Uri NextAsUriWithoutRefresh(string? path, string? query)
+        {
+            Uri uri = this.SelectNextUri();
+            return BuildUri(uri, path, query);
+        }
+
         internal Uri GetNodeForHash(long hash)
         {
-            this.MarkActivity();
             var nodes = this.GetActiveNodesInternal();
             if (nodes.Count == 0)
             {
@@ -509,19 +501,16 @@ namespace ScyllaDB.Alternator
 
         internal LazyQueryPlan CreateQueryPlan(long seed)
         {
-            this.MarkActivity();
             return new LazyQueryPlan(this, seed);
         }
 
         internal LazyQueryPlan CreateQueryPlan(IEnumerable<Uri> preferredNodes)
         {
-            this.MarkActivity();
             return new LazyQueryPlan(this, preferredNodes);
         }
 
         internal LazyQueryPlan CreateQueryPlan()
         {
-            this.MarkActivity();
             return new LazyQueryPlan(this);
         }
 
@@ -693,6 +682,12 @@ namespace ScyllaDB.Alternator
                         return;
                     }
 
+                    if (!this.WaitForRefreshSignalOrIdleInterval(cancellationToken))
+                    {
+                        return;
+                    }
+
+                    this.DeferRequestRefresh();
                     try
                     {
                         this.UpdateLiveNodes();
@@ -701,11 +696,6 @@ namespace ScyllaDB.Alternator
                     catch (IOException e)
                     {
                         Logger.Error(e, "AlternatorLiveNodes failed to sync nodes list: %");
-                    }
-
-                    if (cancellationToken.WaitHandle.WaitOne(this.GetRefreshInterval()))
-                    {
-                        return;
                     }
                 }
             }
@@ -742,22 +732,98 @@ namespace ScyllaDB.Alternator
             }
         }
 
-        private int GetRefreshInterval()
+        private Uri SelectNextUri()
         {
-            var lastActivity = Interlocked.Read(ref this.lastActivityTicks);
-            var idleThreshold = TimeSpan.FromMilliseconds(this.config.IdleRefreshIntervalMs);
-            var timeSinceActivity = DateTimeOffset.UtcNow - new DateTimeOffset(lastActivity, TimeSpan.Zero);
-            if (timeSinceActivity < idleThreshold)
+            var activeNodes = this.GetActiveNodesInternal();
+            if (activeNodes.Count == 0)
             {
-                return checked((int)this.config.ActiveRefreshIntervalMs);
+                this.ProbeDownNodesOnce(CancellationToken.None);
+                activeNodes = this.GetActiveNodesInternal();
             }
 
+            var quarantinedNode = this.SelectQuarantinedNode(activeNodes.Count == 0);
+            if (quarantinedNode != null)
+            {
+                return quarantinedNode;
+            }
+
+            if (activeNodes.Count == 0)
+            {
+                throw new InvalidOperationException("No live nodes available");
+            }
+
+            var sequence = Interlocked.Increment(ref this.nextLiveNodeIndex) - 1;
+            var index = Mod(sequence, activeNodes.Count);
+            return activeNodes[index];
+        }
+
+        private int GetRefreshInterval()
+        {
             return checked((int)this.config.IdleRefreshIntervalMs);
         }
 
         private void MarkActivity()
         {
-            Interlocked.Exchange(ref this.lastActivityTicks, DateTimeOffset.UtcNow.Ticks);
+            if (this.refreshTask == null)
+            {
+                this.Start();
+            }
+
+            this.TriggerUpdate();
+        }
+
+        private void TriggerUpdate()
+        {
+            var now = DateTimeOffset.UtcNow.Ticks;
+            var nextRefresh = Interlocked.Read(ref this.nextRequestRefreshTicks);
+            if (nextRefresh >= now)
+            {
+                return;
+            }
+
+            var requestedNextRefresh = checked(now + TimeSpan.FromMilliseconds(this.config.ActiveRefreshIntervalMs).Ticks);
+            if (Interlocked.CompareExchange(ref this.nextRequestRefreshTicks, requestedNextRefresh, nextRefresh) == nextRefresh)
+            {
+                Interlocked.Exchange(ref this.updateRequested, 1);
+                this.SignalUpdateWaiters();
+            }
+        }
+
+        private void DeferRequestRefresh()
+        {
+            var requestedNextRefresh = checked(
+                DateTimeOffset.UtcNow.Ticks + TimeSpan.FromMilliseconds(this.config.ActiveRefreshIntervalMs).Ticks);
+            Interlocked.Exchange(ref this.nextRequestRefreshTicks, requestedNextRefresh);
+        }
+
+        private void SignalUpdateWaiters()
+        {
+            lock (this.updateSignalLock)
+            {
+                Monitor.PulseAll(this.updateSignalLock);
+            }
+        }
+
+        private bool WaitForRefreshSignalOrIdleInterval(CancellationToken cancellationToken)
+        {
+            using var registration = cancellationToken.Register(this.SignalUpdateWaiters);
+            lock (this.updateSignalLock)
+            {
+                while (!cancellationToken.IsCancellationRequested)
+                {
+                    if (Interlocked.Exchange(ref this.updateRequested, 0) == 1)
+                    {
+                        return true;
+                    }
+
+                    if (!Monitor.Wait(this.updateSignalLock, this.GetRefreshInterval()))
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            return false;
         }
 
         private void SetLiveNodes(List<Uri> nodes)
@@ -925,7 +991,7 @@ namespace ScyllaDB.Alternator
         private Uri NextAsLocalNodesUri()
         {
             var query = this.config.RoutingScope.LocalNodesQuery;
-            return this.NextAsUri("/localnodes", string.IsNullOrEmpty(query) ? null : query);
+            return this.NextAsUriWithoutRefresh("/localnodes", string.IsNullOrEmpty(query) ? null : query);
         }
 
         private Uri? SelectQuarantinedNode(bool activeNodesEmpty)

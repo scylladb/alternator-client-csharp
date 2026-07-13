@@ -4,7 +4,7 @@
 
 `ScyllaDB.Alternator` adds client-side load balancing for ScyllaDB Alternator to the AWS SDK for .NET DynamoDB client.
 
-DynamoDB applications normally point at one endpoint. Alternator is a distributed cluster, so a client should spread requests across live Alternator nodes and keep working when one node fails. This library discovers Alternator nodes through `/localnodes`, maintains the live-node list in the background, and installs AWS SDK pipeline handlers that choose a node for each request.
+DynamoDB applications normally point at one endpoint. Alternator is a distributed cluster, so a client should spread requests across live Alternator nodes and keep working when one node fails. This library discovers Alternator nodes through `/localnodes`, refreshes the live-node list in the background, and installs AWS SDK pipeline handlers that choose a node for each request.
 
 The library does not replace the AWS SDK. `AlternatorDynamoDBClient.builder().Build()` returns a regular `AmazonDynamoDBClient`, and DynamoDB operations use the normal C# AWS SDK API.
 
@@ -91,7 +91,7 @@ Uri nextNode = alternator.nextAsURI();
 AlternatorLiveNodes manager = alternator.getAlternatorLiveNodes();
 ```
 
-The wrapper owns the DynamoDB client and live-node polling. Disposing the wrapper shuts down polling and disposes the client.
+The wrapper owns the DynamoDB client and live-node polling. Direct node selection can trigger a refresh before the next idle polling interval. Disposing the wrapper shuts down polling and disposes the client.
 
 ## Routing Scope
 

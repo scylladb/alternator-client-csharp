@@ -4,6 +4,9 @@
 
 namespace ScyllaDB.Alternator
 {
+    using System.Net;
+    using System.Net.Sockets;
+    using System.Text;
     using Amazon.DynamoDBv2;
     using Amazon.DynamoDBv2.Model;
     using Amazon.Runtime;
@@ -81,6 +84,23 @@ namespace ScyllaDB.Alternator
 
         [Test]
         [Category("Unit")]
+        public void HelperValidationDoesNotProbeLocalNodesTest()
+        {
+            using var server = new OptionalRequestServer();
+            var options = HelperOptionsBuilder.Create()
+                .WithInitialNodeUri(new Uri($"http://127.0.0.1:{server.Port}"))
+                .WithDeferredStart()
+                .Build();
+
+            var helper = new Helper(options);
+            Thread.Sleep(100);
+
+            Assert.That(helper, Is.Not.Null);
+            Assert.That(server.RequestCount, Is.EqualTo(0));
+        }
+
+        [Test]
+        [Category("Unit")]
         public void HelperOptionsBuilderSupportsCustomHeaderOptimizerTest()
         {
             var options = HelperOptionsBuilder.Create()
@@ -154,6 +174,91 @@ namespace ScyllaDB.Alternator
             Assert.That(wrapper.Config.ConnectionTimeoutMs, Is.EqualTo(76000));
             Assert.That(wrapper.Config.HttpClientTimeoutMs, Is.EqualTo(77000));
             Assert.That(wrapper.getClient().Config.Timeout, Is.EqualTo(TimeSpan.FromMilliseconds(77000)));
+        }
+
+        private sealed class OptionalRequestServer : IDisposable
+        {
+            private readonly CancellationTokenSource cancellation = new CancellationTokenSource();
+            private readonly TcpListener listener;
+            private readonly Task serverTask;
+            private int requestCount;
+            private bool disposed;
+
+            internal OptionalRequestServer()
+            {
+                this.listener = new TcpListener(IPAddress.Loopback, 0);
+                this.listener.Start();
+                this.Port = ((IPEndPoint)this.listener.LocalEndpoint).Port;
+                this.serverTask = Task.Run(this.RunAsync);
+            }
+
+            internal int Port { get; }
+
+            internal int RequestCount => Volatile.Read(ref this.requestCount);
+
+            public void Dispose()
+            {
+                if (this.disposed)
+                {
+                    return;
+                }
+
+                this.disposed = true;
+                this.cancellation.Cancel();
+                this.listener.Stop();
+                try
+                {
+                    this.serverTask.Wait(TimeSpan.FromSeconds(5));
+                }
+                catch (AggregateException exception) when (exception.InnerExceptions.All(IsExpectedShutdownException))
+                {
+                }
+
+                this.cancellation.Dispose();
+            }
+
+            private static bool IsExpectedShutdownException(Exception exception)
+            {
+                return exception is OperationCanceledException || exception is ObjectDisposedException;
+            }
+
+            private static async Task HandleClientAsync(TcpClient client, CancellationToken cancellationToken)
+            {
+                await using var stream = client.GetStream();
+                using var reader = new StreamReader(stream, Encoding.ASCII, leaveOpen: true);
+                string? header;
+                do
+                {
+                    header = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
+                }
+                while (!string.IsNullOrEmpty(header));
+
+                var body = Encoding.UTF8.GetBytes("[\"127.0.0.1\"]");
+                var response = Encoding.ASCII.GetBytes(
+                    "HTTP/1.1 200 OK\r\n"
+                    + "Content-Type: application/json\r\n"
+                    + "Content-Length: "
+                    + body.Length
+                    + "\r\nConnection: close\r\n\r\n");
+                await stream.WriteAsync(response, cancellationToken).ConfigureAwait(false);
+                await stream.WriteAsync(body, cancellationToken).ConfigureAwait(false);
+            }
+
+            private async Task RunAsync()
+            {
+                try
+                {
+                    while (!this.cancellation.IsCancellationRequested)
+                    {
+                        using var client = await this.listener.AcceptTcpClientAsync(this.cancellation.Token).ConfigureAwait(false);
+                        Interlocked.Increment(ref this.requestCount);
+                        await HandleClientAsync(client, this.cancellation.Token).ConfigureAwait(false);
+                    }
+                }
+                catch (Exception exception) when (this.cancellation.IsCancellationRequested && IsExpectedShutdownException(exception))
+                {
+                }
+            }
         }
     }
 }
