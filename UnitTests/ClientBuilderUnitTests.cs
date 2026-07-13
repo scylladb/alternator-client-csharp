@@ -228,6 +228,7 @@ namespace ScyllaDB.Alternator
             var wrapper = new AlternatorDynamoDBClientWrapper(client, liveNodes, config);
 
             liveNodes.start().Wait(TimeSpan.FromSeconds(5));
+            liveNodes.nextAsURI();
             Assert.That(
                 SpinWait.SpinUntil(() => handler.SendCount > 0, TimeSpan.FromSeconds(5)),
                 Is.True);

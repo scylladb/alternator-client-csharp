@@ -9,7 +9,6 @@ namespace ScyllaDB.Alternator
 
     public class Helper : IEndpointProvider
     {
-        private static readonly NLog.Logger Logger = NLog.LogManager.GetCurrentClassLogger();
         private readonly AlternatorLiveNodes liveNodes;
 
         /// <summary>
@@ -64,10 +63,6 @@ namespace ScyllaDB.Alternator
                 try
                 {
                     this.liveNodes.Validate();
-                    if (!this.liveNodes.CheckIfRoutingScopeFeatureIsSupported())
-                    {
-                        Logger.Error("server does not support rack or datacenter filtering");
-                    }
                 }
                 catch (Exception e)
                 {
@@ -83,7 +78,7 @@ namespace ScyllaDB.Alternator
 
         public Endpoint ResolveEndpoint(EndpointParameters parameters)
         {
-            return new Endpoint(this.liveNodes.NextAsUri().ToString());
+            return new Endpoint(this.liveNodes.NextAsUriWithoutRefresh().ToString());
         }
 
         /// <summary>
