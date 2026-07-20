@@ -4,6 +4,9 @@
 
 namespace ScyllaDB.Alternator
 {
+    using System.Net;
+    using System.Net.Sockets;
+    using System.Text;
     using Amazon.DynamoDBv2;
     using Amazon.DynamoDBv2.Model;
     using Amazon.Runtime;
@@ -112,6 +115,31 @@ namespace ScyllaDB.Alternator
             Assert.That(config!.SeedHosts, Is.Not.Empty);
             Assert.That(liveNodesManager.getLiveNodes(), Is.EqualTo(liveNodes));
             Assert.That(liveNodes, Does.Contain(next));
+        }
+
+        [Test]
+        public async Task DnsEntrypointDiscoversLiveClusterNodesTest()
+        {
+            using var server = new LocalNodesReplayServer(await this.FetchIntegrationLocalNodesAsync());
+            var config = AlternatorConfig.builder()
+                .withSeedHost("localhost")
+                .withScheme("http")
+                .withPort(server.Port)
+                .build();
+            var liveNodes = new AlternatorLiveNodes(config);
+
+            try
+            {
+                InvokeUpdateLiveNodes(liveNodes);
+                server.WaitForRequest();
+
+                Assert.That(server.LastHost, Is.EqualTo($"localhost:{server.Port}"));
+                Assert.That(liveNodes.getLiveNodes(), Is.Not.Empty);
+            }
+            finally
+            {
+                liveNodes.shutdownAndWait();
+            }
         }
 
         [Test]
@@ -233,6 +261,15 @@ namespace ScyllaDB.Alternator
             return string.Concat(Enumerable.Repeat("This is a test value that should be compressed. ", 100));
         }
 
+        private static void InvokeUpdateLiveNodes(AlternatorLiveNodes liveNodes)
+        {
+            var method = typeof(AlternatorLiveNodes).GetMethod(
+                "UpdateLiveNodes",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+            Assert.That(method, Is.Not.Null);
+            method!.Invoke(liveNodes, Array.Empty<object>());
+        }
+
         private static async Task WaitUntilAsync(Func<bool> condition)
         {
             var deadline = DateTimeOffset.UtcNow.AddSeconds(10);
@@ -249,6 +286,15 @@ namespace ScyllaDB.Alternator
             Assert.That(condition(), Is.True);
         }
 
+        private async Task<string> FetchIntegrationLocalNodesAsync()
+        {
+            using var httpClient = new HttpClient
+            {
+                Timeout = TimeSpan.FromSeconds(5),
+            };
+            return await httpClient.GetStringAsync(new Uri(new Uri(this.endpoint), "/localnodes"));
+        }
+
         // Alternator-specific DynamoDB connection
         private AmazonDynamoDBClient GetAlternatorClient(Uri uri, string datacenter, string rack)
         {
@@ -262,6 +308,93 @@ namespace ScyllaDB.Alternator
             return AlternatorDynamoDBClient.builder()
                 .endpointOverride(uri)
                 .credentialsProvider(new BasicAWSCredentials(this.user, this.password));
+        }
+
+        private sealed class LocalNodesReplayServer : IDisposable
+        {
+            private readonly TcpListener listener;
+            private readonly string body;
+            private readonly Task serverTask;
+            private bool disposed;
+
+            internal LocalNodesReplayServer(string body)
+            {
+                this.body = body;
+                this.listener = new TcpListener(IPAddress.Any, 0);
+                this.listener.Start();
+                this.Port = ((IPEndPoint)this.listener.LocalEndpoint).Port;
+                this.serverTask = Task.Run(this.RunAsync);
+            }
+
+            internal int Port { get; }
+
+            internal string LastHost { get; private set; } = string.Empty;
+
+            public void Dispose()
+            {
+                if (this.disposed)
+                {
+                    return;
+                }
+
+                this.disposed = true;
+                this.listener.Stop();
+                try
+                {
+                    this.serverTask.Wait(TimeSpan.FromSeconds(5));
+                }
+                catch (AggregateException exception) when (exception.InnerExceptions.All(IsExpectedShutdownException))
+                {
+                }
+            }
+
+            internal void WaitForRequest()
+            {
+                if (!this.serverTask.Wait(TimeSpan.FromSeconds(5)))
+                {
+                    Assert.Fail("Timed out waiting for DNS entrypoint request.");
+                }
+
+                if (this.serverTask.IsFaulted)
+                {
+                    throw this.serverTask.Exception!;
+                }
+            }
+
+            private static bool IsExpectedShutdownException(Exception exception)
+            {
+                return exception is SocketException || exception is ObjectDisposedException;
+            }
+
+            private async Task RunAsync()
+            {
+                using var client = await this.listener.AcceptTcpClientAsync();
+                await this.HandleClientAsync(client);
+            }
+
+            private async Task HandleClientAsync(TcpClient client)
+            {
+                await using var stream = client.GetStream();
+                using var reader = new StreamReader(stream, Encoding.ASCII, leaveOpen: true);
+                _ = await reader.ReadLineAsync();
+                string? header;
+                while (!string.IsNullOrEmpty(header = await reader.ReadLineAsync()))
+                {
+                    if (header.StartsWith("Host:", StringComparison.OrdinalIgnoreCase))
+                    {
+                        this.LastHost = header.Substring("Host:".Length).Trim();
+                    }
+                }
+
+                var responseBody = Encoding.UTF8.GetBytes(this.body);
+                var responseHeader = Encoding.ASCII.GetBytes(
+                    "HTTP/1.1 200 OK\r\n"
+                    + "Content-Type: application/json\r\n"
+                    + $"Content-Length: {responseBody.Length}\r\n"
+                    + "Connection: close\r\n\r\n");
+                await stream.WriteAsync(responseHeader);
+                await stream.WriteAsync(responseBody);
+            }
         }
     }
 }

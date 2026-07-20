@@ -130,6 +130,27 @@ namespace ScyllaDB.Alternator
         }
 
         [Test]
+        public void UpdateLiveNodesResolvesDnsEntrypointAndKeepsDnsNodeRecordsTest()
+        {
+            using var server = new LocalNodesServer(1, _ => "[\"localhost\",\"node-a.internal\"]");
+            var config = AlternatorConfig.builder()
+                .withSeedHost("localhost")
+                .withScheme("http")
+                .withPort(server.Port)
+                .withRoutingScope(ClusterScope.create())
+                .build();
+            var liveNodes = new AlternatorLiveNodes(config);
+
+            InvokeUpdateLiveNodes(liveNodes);
+            server.WaitForRequests();
+
+            Assert.That(server.Requests[0].Host, Is.EqualTo($"localhost:{server.Port}"));
+            Assert.That(
+                liveNodes.getLiveNodes().Select(node => node.Host),
+                Is.EqualTo(new[] { "localhost", "node-a.internal" }));
+        }
+
+        [Test]
         public void ClusterScopePollsAllSeedNodesAndMergesResultsTest()
         {
             var handler = new DiscoveryHttpMessageHandler(new Dictionary<string, string>
