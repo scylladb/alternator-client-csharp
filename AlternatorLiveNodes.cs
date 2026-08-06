@@ -865,8 +865,7 @@ namespace ScyllaDB.Alternator
                     var nodes = this.GetNodesForScope(scope);
                     if (nodes.Count != 0)
                     {
-                        var mergedNodes = this.MergeWithInitialNodes(nodes);
-                        this.SetLiveNodes(mergedNodes);
+                        this.SetLiveNodes(nodes);
                         Logger.Info($"Updated hosts to {this.liveNodes} using {scope.Description}");
                         return;
                     }
