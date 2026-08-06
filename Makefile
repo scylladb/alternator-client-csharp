@@ -204,7 +204,9 @@ fix: fix-dotnet-format
 
 .PHONY: check-license-headers
 check-license-headers:
-	dotnet format analyzers --verify-no-changes --diagnostics SA1633 SA1636 SA1638 --severity warn --verbosity diagnostic ScyllaDB.Alternator.sln
+	dotnet format analyzers --verify-no-changes --diagnostics SA1633 SA1636 SA1638 --severity warn --verbosity diagnostic ScyllaDB.Alternator.csproj
+	dotnet format analyzers --verify-no-changes --diagnostics SA1633 SA1636 SA1638 --severity warn --verbosity diagnostic UnitTests/ScyllaDB.Alternator.Test.csproj
+	dotnet format analyzers --verify-no-changes --diagnostics SA1633 SA1636 SA1638 --severity warn --verbosity diagnostic IntegrationTests/ScyllaDB.Alternator.Test.csproj
 
 .PHONY: check-dotnet-format
 check-dotnet-format:
