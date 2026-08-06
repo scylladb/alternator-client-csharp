@@ -175,7 +175,7 @@ namespace ScyllaDB.Alternator
             Assert.That(liveNodes.getNodeStatus(Node("node3.example.com")), Is.Not.Null);
             Assert.That(
                 liveNodes.getLiveNodes(),
-                Is.EqualTo(new[] { Node("node3.example.com"), Node("node1.example.com") }));
+                Is.EqualTo(new[] { Node("node3.example.com") }));
         }
 
         [Test]

@@ -120,7 +120,7 @@ namespace ScyllaDB.Alternator
         }
 
         [Test]
-        public void UpdateLiveNodesAppendsSeedNodesToDiscoveredNodesTest()
+        public void UpdateLiveNodesReplacesSeedNodesWithDiscoveredNodesTest()
         {
             using var server = new LocalNodesServer(1, _ => "[\"127.0.0.2\"]");
             var config = AlternatorConfig.builder()
@@ -136,7 +136,7 @@ namespace ScyllaDB.Alternator
 
             Assert.That(
                 liveNodes.getLiveNodes().Select(node => node.Host),
-                Is.EqualTo(new[] { "127.0.0.2", "127.0.0.1" }));
+                Is.EqualTo(new[] { "127.0.0.2" }));
         }
 
         [Test]
@@ -217,7 +217,7 @@ namespace ScyllaDB.Alternator
 
             Assert.That(
                 liveNodes.getLiveNodes().Select(node => node.Host),
-                Is.EqualTo(new[] { "dc1-node1.example.com", "dc2-node1.example.com" }));
+                Is.EqualTo(new[] { "dc1-node1.example.com" }));
             Assert.That(
                 handler.RequestedUris.Select(uri => uri.Host),
                 Is.EqualTo(new[] { "dc1-node1.example.com", "dc2-node1.example.com" }));
@@ -244,7 +244,7 @@ namespace ScyllaDB.Alternator
 
             Assert.That(
                 liveNodes.getLiveNodes().Select(node => node.Host),
-                Is.EqualTo(new[] { "dc1-rack1-node.example.com", "dc2-node1.example.com", "dc1-node1.example.com" }));
+                Is.EqualTo(new[] { "dc1-rack1-node.example.com" }));
             Assert.That(
                 handler.RequestedUris.Select(uri => uri.Host),
                 Is.EqualTo(new[] { "dc2-node1.example.com", "dc1-node1.example.com" }));
@@ -316,8 +316,104 @@ namespace ScyllaDB.Alternator
             Assert.That(liveNodes.getLiveNodes(), Is.EqualTo(new[]
             {
                 new Uri("http://[::2]:8080"),
-                new Uri("http://[::1]:8080"),
             }));
+        }
+
+        [Test]
+        public void PollingRequestUsesIpv6LiteralEndpointTest()
+        {
+            using var server = new LocalNodesServer(
+                1,
+                _ => "[\"::1\"]",
+                IPAddress.IPv6Loopback);
+            var config = AlternatorConfig.builder()
+                .withSeedHost("::1")
+                .withScheme("http")
+                .withPort(server.Port)
+                .withRoutingScope(ClusterScope.create())
+                .build();
+            var liveNodes = new AlternatorLiveNodes(config);
+
+            InvokeUpdateLiveNodes(liveNodes);
+            server.WaitForRequests();
+
+            Assert.That(server.Requests[0].Host, Is.EqualTo($"[::1]:{server.Port}"));
+            Assert.That(liveNodes.getLiveNodes(), Is.EqualTo(new[]
+            {
+                new Uri($"http://[::1]:{server.Port}"),
+            }));
+        }
+
+        [Test]
+        public void DualStackDnsFallsBackFromBrokenIpv6ToIpv4Test()
+        {
+            using var server = new LocalNodesServer(1, _ => "[\"127.0.0.1\"]", IPAddress.Loopback);
+            var attempts = new List<IPAddress>();
+            using var pollingHttpClient = CreateAddressMappedHttpClient(
+                new[] { IPAddress.IPv6Loopback, IPAddress.Loopback },
+                attempts);
+            var config = AlternatorConfig.builder()
+                .withSeedHost("entrypoint.test")
+                .withScheme("http")
+                .withPort(server.Port)
+                .withRoutingScope(ClusterScope.create())
+                .build();
+            var liveNodes = new AlternatorLiveNodes(config, pollingHttpClient);
+
+            InvokeUpdateLiveNodes(liveNodes);
+            server.WaitForRequests();
+
+            Assert.That(attempts, Is.EqualTo(new[] { IPAddress.IPv6Loopback, IPAddress.Loopback }));
+            Assert.That(server.Requests[0].Host, Is.EqualTo($"entrypoint.test:{server.Port}"));
+            Assert.That(liveNodes.getLiveNodes().Select(node => node.Host), Is.EqualTo(new[] { "127.0.0.1" }));
+        }
+
+        [Test]
+        public void DualStackDnsFallsBackFromBrokenIpv4ToIpv6Test()
+        {
+            using var server = new LocalNodesServer(1, _ => "[\"::1\"]", IPAddress.IPv6Loopback);
+            var attempts = new List<IPAddress>();
+            using var pollingHttpClient = CreateAddressMappedHttpClient(
+                new[] { IPAddress.Loopback, IPAddress.IPv6Loopback },
+                attempts);
+            var config = AlternatorConfig.builder()
+                .withSeedHost("entrypoint.test")
+                .withScheme("http")
+                .withPort(server.Port)
+                .withRoutingScope(ClusterScope.create())
+                .build();
+            var liveNodes = new AlternatorLiveNodes(config, pollingHttpClient);
+
+            InvokeUpdateLiveNodes(liveNodes);
+            server.WaitForRequests();
+
+            Assert.That(attempts, Is.EqualTo(new[] { IPAddress.Loopback, IPAddress.IPv6Loopback }));
+            Assert.That(server.Requests[0].Host, Is.EqualTo($"entrypoint.test:{server.Port}"));
+            Assert.That(liveNodes.getLiveNodes().Select(node => node.Host), Is.EqualTo(new[] { "[::1]" }));
+        }
+
+        [Test]
+        public void FailedRefreshReinjectsOriginalIpv6EntrypointTest()
+        {
+            using var server = new LocalNodesServer(1, _ => "[\"::2\"]", IPAddress.IPv6Loopback);
+            var config = AlternatorConfig.builder()
+                .withSeedHost("::1")
+                .withScheme("http")
+                .withPort(server.Port)
+                .withRoutingScope(ClusterScope.create())
+                .build();
+            var liveNodes = new AlternatorLiveNodes(config);
+
+            InvokeUpdateLiveNodes(liveNodes);
+            server.WaitForRequests();
+            Assert.That(liveNodes.getLiveNodes().Select(node => node.Host), Is.EqualTo(new[] { "[::2]" }));
+
+            server.Dispose();
+            InvokeUpdateLiveNodes(liveNodes);
+
+            Assert.That(
+                liveNodes.getLiveNodes().Select(node => node.Host),
+                Is.EqualTo(new[] { "[::2]", "[::1]" }));
         }
 
         [Test]
@@ -373,7 +469,7 @@ namespace ScyllaDB.Alternator
                 hosts.Add(queryPlan.next().Host);
             }
 
-            Assert.That(hosts, Is.EquivalentTo(new[] { "127.0.0.1", "127.0.0.2", "127.0.0.3" }));
+            Assert.That(hosts, Is.EquivalentTo(new[] { "127.0.0.2", "127.0.0.3" }));
         }
 
         [Test]
@@ -398,7 +494,7 @@ namespace ScyllaDB.Alternator
                 Is.EqualTo(new[] { "/localnodes?dc=dc1&rack=rack1", "/localnodes" }));
             Assert.That(
                 liveNodes.getLiveNodes().Select(node => node.Host),
-                Is.EqualTo(new[] { "127.0.0.5", "127.0.0.1" }));
+                Is.EqualTo(new[] { "127.0.0.5" }));
         }
 
         [Test]
@@ -422,7 +518,7 @@ namespace ScyllaDB.Alternator
             Assert.That(handler.DisposeCount, Is.EqualTo(0));
             Assert.That(
                 liveNodes.getLiveNodes().Select(node => node.Host),
-                Is.EqualTo(new[] { "127.0.0.2", "127.0.0.1" }));
+                Is.EqualTo(new[] { "127.0.0.2" }));
         }
 
         [Test]
@@ -594,6 +690,40 @@ namespace ScyllaDB.Alternator
             method!.Invoke(liveNodes, Array.Empty<object>());
         }
 
+        private static HttpClient CreateAddressMappedHttpClient(
+            IEnumerable<IPAddress> addresses,
+            ICollection<IPAddress> attempts)
+        {
+            var handler = new SocketsHttpHandler
+            {
+                UseProxy = false,
+                ConnectCallback = async (context, cancellationToken) =>
+                {
+                    Exception? lastException = null;
+                    foreach (var address in addresses)
+                    {
+                        attempts.Add(address);
+                        var socket = new Socket(address.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
+                        try
+                        {
+                            await socket.ConnectAsync(
+                                new IPEndPoint(address, context.DnsEndPoint.Port),
+                                cancellationToken);
+                            return new NetworkStream(socket, ownsSocket: true);
+                        }
+                        catch (Exception exception)
+                        {
+                            socket.Dispose();
+                            lastException = exception;
+                        }
+                    }
+
+                    throw new HttpRequestException("No mapped DNS address was reachable.", lastException);
+                },
+            };
+            return new HttpClient(handler, disposeHandler: true);
+        }
+
         private sealed class TrackingHttpMessageHandler : HttpMessageHandler
         {
             private readonly string responseBody;
@@ -681,11 +811,14 @@ namespace ScyllaDB.Alternator
             private readonly Task serverTask;
             private bool disposed;
 
-            internal LocalNodesServer(int expectedRequests, Func<RequestRecord, string?> responseBody)
+            internal LocalNodesServer(
+                int expectedRequests,
+                Func<RequestRecord, string?> responseBody,
+                IPAddress? listenAddress = null)
             {
                 this.expectedRequests = expectedRequests;
                 this.responseBody = responseBody;
-                this.listener = new TcpListener(IPAddress.Any, 0);
+                this.listener = new TcpListener(listenAddress ?? IPAddress.Any, 0);
                 this.listener.Start();
                 this.Port = ((IPEndPoint)this.listener.LocalEndpoint).Port;
                 this.serverTask = Task.Run(this.RunAsync);
