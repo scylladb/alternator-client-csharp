@@ -17,7 +17,11 @@ namespace ScyllaDB.Alternator
     using System.Collections.Concurrent;
     using System.Diagnostics;
     using System.Net;
+    using System.Net.Security;
     using System.Net.Sockets;
+    using System.Security.Authentication;
+    using System.Security.Cryptography;
+    using System.Security.Cryptography.X509Certificates;
     using System.Text;
     using ScyllaDB.Alternator.KeyRouting;
     using ScyllaDB.Alternator.Routing;
@@ -551,6 +555,70 @@ namespace ScyllaDB.Alternator
             finally
             {
                 liveNodes.shutdownAndWait();
+            }
+        }
+
+        [Test]
+        public void DnsAddressFallbackPreservesTlsHostSniAndCertificateIdentityTest()
+        {
+            var firstAddress = IPAddress.Parse("127.0.0.2");
+            var secondAddress = IPAddress.Loopback;
+            using var certificate = CreateLogicalHostServerCertificate("entrypoint.test");
+            using var firstListener = new TcpListener(firstAddress, 0);
+            firstListener.Start();
+            var port = ((IPEndPoint)firstListener.LocalEndpoint).Port;
+            using var secondListener = new TcpListener(secondAddress, port);
+            secondListener.Start();
+
+            var firstRequest = ServeTlsLocalNodesOnceAsync(
+                firstListener,
+                certificate,
+                HttpStatusCode.ServiceUnavailable,
+                "{\"error\":\"temporary\"}");
+            var secondRequest = ServeTlsLocalNodesOnceAsync(
+                secondListener,
+                certificate,
+                HttpStatusCode.OK,
+                "[\"127.0.0.20\"]");
+            var tlsConfig = TlsConfig.builder()
+                .WithTrustSystemCaCerts(false)
+                .WithCaCertificate(certificate)
+                .Build();
+            var config = AlternatorConfig.builder()
+                .withSeedHost("entrypoint.test")
+                .withScheme("https")
+                .withPort(port)
+                .withTlsConfig(tlsConfig)
+                .withRoutingScope(ClusterScope.create())
+                .withConnectionTimeoutMs(1000)
+                .withHttpClientTimeoutMs(3000)
+                .build();
+            var liveNodes = new AddressMappedLiveNodes(
+                config,
+                () => new[] { firstAddress, secondAddress });
+            try
+            {
+                InvokeUpdateLiveNodes(liveNodes);
+                var requests = Task.WhenAll(firstRequest, secondRequest)
+                    .WaitAsync(TimeSpan.FromSeconds(5))
+                    .GetAwaiter()
+                    .GetResult();
+
+                Assert.That(
+                    requests.Select(request => request.Host),
+                    Is.EqualTo(new[] { $"entrypoint.test:{port}", $"entrypoint.test:{port}" }));
+                Assert.That(
+                    requests.Select(request => request.ServerName),
+                    Is.EqualTo(new[] { "entrypoint.test", "entrypoint.test" }));
+                Assert.That(
+                    liveNodes.getLiveNodes().Select(node => node.Host),
+                    Is.EqualTo(new[] { "127.0.0.20" }));
+            }
+            finally
+            {
+                liveNodes.shutdownAndWait();
+                firstListener.Stop();
+                secondListener.Stop();
             }
         }
 
@@ -1238,6 +1306,74 @@ namespace ScyllaDB.Alternator
             return new HttpClient(handler, disposeHandler: true);
         }
 
+        private static X509Certificate2 CreateLogicalHostServerCertificate(string hostname)
+        {
+            using var key = RSA.Create(2048);
+            var request = new CertificateRequest(
+                $"CN={hostname}",
+                key,
+                HashAlgorithmName.SHA256,
+                RSASignaturePadding.Pkcs1);
+            var subjectAlternativeNames = new SubjectAlternativeNameBuilder();
+            subjectAlternativeNames.AddDnsName(hostname);
+            request.CertificateExtensions.Add(subjectAlternativeNames.Build());
+            request.CertificateExtensions.Add(new X509BasicConstraintsExtension(true, false, 0, true));
+            request.CertificateExtensions.Add(
+                new X509KeyUsageExtension(
+                    X509KeyUsageFlags.DigitalSignature | X509KeyUsageFlags.KeyCertSign,
+                    true));
+            request.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(request.PublicKey, false));
+            using var generated = request.CreateSelfSigned(
+                DateTimeOffset.UtcNow.AddDays(-1),
+                DateTimeOffset.UtcNow.AddDays(1));
+            return new X509Certificate2(generated.Export(X509ContentType.Pkcs12));
+        }
+
+        private static async Task<TlsRequestRecord> ServeTlsLocalNodesOnceAsync(
+            TcpListener listener,
+            X509Certificate2 certificate,
+            HttpStatusCode status,
+            string responseBody)
+        {
+            using var client = await listener.AcceptTcpClientAsync();
+            await using var stream = new SslStream(client.GetStream(), leaveInnerStreamOpen: false);
+            string? serverName = null;
+            await stream.AuthenticateAsServerAsync(new SslServerAuthenticationOptions
+            {
+                ServerCertificateSelectionCallback = (_, requestedName) =>
+                {
+                    serverName = requestedName;
+                    return certificate;
+                },
+                EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
+                CertificateRevocationCheckMode = X509RevocationMode.NoCheck,
+            });
+
+            using var reader = new StreamReader(stream, Encoding.ASCII, leaveOpen: true);
+            _ = await reader.ReadLineAsync();
+            var host = string.Empty;
+            string? header;
+            while (!string.IsNullOrEmpty(header = await reader.ReadLineAsync()))
+            {
+                if (header.StartsWith("Host:", StringComparison.OrdinalIgnoreCase))
+                {
+                    host = header.Substring("Host:".Length).Trim();
+                }
+            }
+
+            var body = Encoding.UTF8.GetBytes(responseBody);
+            var reason = status == HttpStatusCode.OK ? "OK" : "Service Unavailable";
+            var responseHeaders = Encoding.ASCII.GetBytes(
+                $"HTTP/1.1 {(int)status} {reason}\r\n"
+                + "Content-Type: application/json\r\n"
+                + $"Content-Length: {body.Length}\r\n"
+                + "Connection: close\r\n\r\n");
+            await stream.WriteAsync(responseHeaders);
+            await stream.WriteAsync(body);
+            await stream.FlushAsync();
+            return new TlsRequestRecord(host, serverName);
+        }
+
         private sealed class TrackingHttpMessageHandler : HttpMessageHandler
         {
             private readonly string responseBody;
@@ -1416,6 +1552,19 @@ namespace ScyllaDB.Alternator
                 return this.lastResolution
                     ?? throw new InvalidOperationException("No simulated DNS resolution remains for " + host);
             }
+        }
+
+        private sealed class TlsRequestRecord
+        {
+            internal TlsRequestRecord(string host, string? serverName)
+            {
+                this.Host = host;
+                this.ServerName = serverName;
+            }
+
+            internal string Host { get; }
+
+            internal string? ServerName { get; }
         }
 
         private sealed class LocalNodesServer : IDisposable
