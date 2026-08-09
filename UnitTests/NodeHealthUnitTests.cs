@@ -162,6 +162,7 @@ namespace ScyllaDB.Alternator
             {
                 "[\"node2.example.com\"]",
                 "[\"node3.example.com\"]",
+                "[\"node3.example.com\"]",
             });
             using var pollingHttpClient = new HttpClient(discoveryHandler);
             var liveNodes = CreateLiveNodes(new[] { "node1.example.com" }, null, pollingHttpClient);

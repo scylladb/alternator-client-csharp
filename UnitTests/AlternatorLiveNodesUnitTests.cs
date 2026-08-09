@@ -23,6 +23,7 @@ namespace ScyllaDB.Alternator
     using System.Security.Cryptography;
     using System.Security.Cryptography.X509Certificates;
     using System.Text;
+    using System.Text.Json;
     using ScyllaDB.Alternator.KeyRouting;
     using ScyllaDB.Alternator.Routing;
 
@@ -223,10 +224,405 @@ namespace ScyllaDB.Alternator
 
             Assert.That(
                 liveNodes.getLiveNodes().Select(node => node.Host),
-                Is.EqualTo(new[] { "dc1-node1.example.com" }));
+                Is.EqualTo(new[] { "dc1-node1.example.com", "dc2-node1.example.com" }));
             Assert.That(
                 handler.RequestedUris.Select(uri => uri.Host),
                 Is.EqualTo(new[] { "dc1-node1.example.com", "dc2-node1.example.com" }));
+        }
+
+        [Test]
+        public void ClusterRefreshUnionsLiveNodesWithRecoveredOriginalSeedsTest()
+        {
+            var handler = new SequenceDiscoveryHttpMessageHandler(
+                () => JsonResponse("[\"live-dc1.example.com\"]"),
+                () => throw new HttpRequestException("dc2 seed initially unavailable"),
+                () => JsonResponse("[\"live-dc1.example.com\"]"),
+                () => JsonResponse("[\"live-dc1.example.com\"]"),
+                () => JsonResponse("[\"live-dc2.example.com\"]"));
+            using var pollingHttpClient = new HttpClient(handler);
+            var config = AlternatorConfig.builder()
+                .withSeedHosts(new[] { "seed-dc1.example.com", "seed-dc2.example.com" })
+                .withScheme("http")
+                .withPort(8000)
+                .withRoutingScope(ClusterScope.create())
+                .build();
+            var liveNodes = new AlternatorLiveNodes(config, pollingHttpClient);
+
+            InvokeUpdateLiveNodes(liveNodes);
+            Assert.That(
+                liveNodes.getLiveNodes().Select(node => node.Host),
+                Is.EqualTo(new[]
+                {
+                    "live-dc1.example.com",
+                    "seed-dc1.example.com",
+                    "seed-dc2.example.com",
+                }));
+
+            InvokeUpdateLiveNodes(liveNodes);
+
+            Assert.That(
+                liveNodes.getLiveNodes().Select(node => node.Host),
+                Is.EqualTo(new[] { "live-dc1.example.com", "live-dc2.example.com" }));
+            Assert.That(
+                handler.RequestedUris.Select(uri => uri.Host),
+                Is.EqualTo(new[]
+                {
+                    "seed-dc1.example.com",
+                    "seed-dc2.example.com",
+                    "live-dc1.example.com",
+                    "seed-dc1.example.com",
+                    "seed-dc2.example.com",
+                }));
+        }
+
+        [Test]
+        public void PartialClusterRefreshRetainsUnavailablePartitionWithFreshNodesFirstTest()
+        {
+            var responses = new Dictionary<string, string>
+            {
+                ["seed.example.com"] = "[\"dc-a-old.example.com\",\"dc-b-old.example.com\"]",
+            };
+            var failingHosts = new HashSet<string>();
+            var handler = new DiscoveryHttpMessageHandler(responses, failingHosts);
+            using var pollingHttpClient = new HttpClient(handler);
+            var config = AlternatorConfig.builder()
+                .withSeedHost("seed.example.com")
+                .withScheme("http")
+                .withPort(8000)
+                .withRoutingScope(ClusterScope.create())
+                .build();
+            var liveNodes = new AlternatorLiveNodes(config, pollingHttpClient);
+
+            InvokeUpdateLiveNodes(liveNodes);
+            responses.Clear();
+            responses["dc-a-old.example.com"] = "[\"dc-a-new.example.com\"]";
+            failingHosts.UnionWith(new[] { "dc-b-old.example.com", "seed.example.com" });
+
+            InvokeUpdateLiveNodes(liveNodes);
+
+            Assert.That(
+                liveNodes.getLiveNodes().Select(node => node.Host),
+                Is.EqualTo(new[]
+                {
+                    "dc-a-new.example.com",
+                    "dc-a-old.example.com",
+                    "dc-b-old.example.com",
+                }));
+        }
+
+        [Test]
+        public void EmptyClusterPartitionCannotDeleteAnotherPartitionsLastKnownGoodTest()
+        {
+            var responses = new Dictionary<string, string>
+            {
+                ["seed.example.com"] = "[\"dc-a-old.example.com\",\"dc-b-old.example.com\"]",
+            };
+            var handler = new DiscoveryHttpMessageHandler(responses);
+            using var pollingHttpClient = new HttpClient(handler);
+            var config = AlternatorConfig.builder()
+                .withSeedHost("seed.example.com")
+                .withScheme("http")
+                .withPort(8000)
+                .withRoutingScope(ClusterScope.create())
+                .build();
+            var liveNodes = new AlternatorLiveNodes(config, pollingHttpClient);
+
+            InvokeUpdateLiveNodes(liveNodes);
+            responses.Clear();
+            responses["dc-a-old.example.com"] = "[\"dc-a-new.example.com\"]";
+            responses["dc-b-old.example.com"] = "[]";
+            responses["seed.example.com"] = "[]";
+
+            InvokeUpdateLiveNodes(liveNodes);
+
+            Assert.That(
+                liveNodes.getLiveNodes().Select(node => node.Host),
+                Is.EqualTo(new[]
+                {
+                    "dc-a-new.example.com",
+                    "dc-a-old.example.com",
+                    "dc-b-old.example.com",
+                }));
+        }
+
+        [Test]
+        public void CompleteClusterRefreshReplacesPreviousSnapshotTest()
+        {
+            var responses = new Dictionary<string, string>
+            {
+                ["seed.example.com"] = "[\"old-a.example.com\",\"old-b.example.com\"]",
+            };
+            var handler = new DiscoveryHttpMessageHandler(responses);
+            using var pollingHttpClient = new HttpClient(handler);
+            var config = AlternatorConfig.builder()
+                .withSeedHost("seed.example.com")
+                .withScheme("http")
+                .withPort(8000)
+                .withRoutingScope(ClusterScope.create())
+                .build();
+            var liveNodes = new AlternatorLiveNodes(config, pollingHttpClient);
+
+            InvokeUpdateLiveNodes(liveNodes);
+            responses.Clear();
+            responses["old-a.example.com"] = "[\"fresh.example.com\"]";
+            responses["old-b.example.com"] = "[\"fresh.example.com\"]";
+            responses["seed.example.com"] = "[\"fresh.example.com\"]";
+
+            InvokeUpdateLiveNodes(liveNodes);
+
+            Assert.That(
+                liveNodes.getLiveNodes().Select(node => node.Host),
+                Is.EqualTo(new[] { "fresh.example.com" }));
+        }
+
+        [Test]
+        public void PartialClusterMergePrioritizesFreshNodesWithinSnapshotBoundTest()
+        {
+            var retained = Enumerable.Range(0, 4096)
+                .Select(index => new Uri($"http://old-{index}.example.com:8000"))
+                .ToList();
+            var fresh = new Uri("http://fresh.example.com:8000");
+
+            var merged = InvokeMergePartialClusterSnapshot(new[] { fresh }, retained);
+
+            Assert.That(merged, Has.Count.EqualTo(4096));
+            Assert.That(merged[0], Is.EqualTo(fresh));
+            Assert.That(merged.Skip(1), Is.EqualTo(retained.Take(4095)));
+            Assert.That(merged, Does.Not.Contain(retained[4095]));
+        }
+
+        [Test]
+        public void WholeDiscoveryCycleSharesDeadlineFairlyAcrossSeedsTest()
+        {
+            var handler = new TimeoutThenHealthySeedHttpMessageHandler(
+                new HashSet<string>
+                {
+                    "slow-one.example.com",
+                    "slow-two.example.com",
+                    "slow-three.example.com",
+                });
+            using var pollingHttpClient = new HttpClient(handler);
+            var config = AlternatorConfig.builder()
+                .withSeedHosts(new[]
+                {
+                    "slow-one.example.com",
+                    "slow-two.example.com",
+                    "slow-three.example.com",
+                    "healthy.example.com",
+                })
+                .withScheme("http")
+                .withPort(8000)
+                .withRoutingScope(ClusterScope.create())
+                .withHttpClientTimeoutMs(600)
+                .build();
+            var liveNodes = new AlternatorLiveNodes(config, pollingHttpClient);
+
+            var stopwatch = Stopwatch.StartNew();
+            InvokeUpdateLiveNodes(liveNodes);
+            stopwatch.Stop();
+
+            Assert.That(stopwatch.Elapsed, Is.LessThan(TimeSpan.FromMilliseconds(1000)));
+            Assert.That(handler.RequestedHosts, Does.Contain("healthy.example.com"));
+            Assert.That(
+                liveNodes.getLiveNodes().Select(node => node.Host),
+                Is.EqualTo(new[]
+                {
+                    "healthy-node.example.com",
+                    "slow-one.example.com",
+                    "slow-two.example.com",
+                    "slow-three.example.com",
+                    "healthy.example.com",
+                }));
+        }
+
+        [Test]
+        public void WholeDiscoveryDeadlineReservesOpportunityForFallbackScopeTest()
+        {
+            var handler = new ScopedTimeoutHttpMessageHandler();
+            using var pollingHttpClient = new HttpClient(handler);
+            var config = AlternatorConfig.builder()
+                .withSeedHosts(new[]
+                {
+                    "seed-one.example.com",
+                    "seed-two.example.com",
+                    "seed-three.example.com",
+                })
+                .withScheme("http")
+                .withPort(8000)
+                .withRoutingScope(DatacenterScope.of("missing", ClusterScope.create()))
+                .withHttpClientTimeoutMs(600)
+                .build();
+            var liveNodes = new AlternatorLiveNodes(config, pollingHttpClient);
+
+            var stopwatch = Stopwatch.StartNew();
+            InvokeUpdateLiveNodes(liveNodes);
+            stopwatch.Stop();
+
+            Assert.That(stopwatch.Elapsed, Is.LessThan(TimeSpan.FromMilliseconds(1000)));
+            Assert.That(handler.RequestedUris.Any(uri => string.IsNullOrEmpty(uri.Query)), Is.True);
+            Assert.That(
+                liveNodes.getLiveNodes().Select(node => node.Host),
+                Is.EqualTo(new[] { "fallback-node.example.com" }));
+        }
+
+        [Test]
+        public void TimedOutDnsAddressesCannotStarveLaterSeedWithinCycleDeadlineTest()
+        {
+            var firstAddress = IPAddress.Parse("127.0.0.2");
+            var secondAddress = IPAddress.Parse("127.0.0.3");
+            using var healthyServer = new LocalNodesServer(
+                1,
+                _ => "[\"healthy-node.example.com\"]",
+                IPAddress.Loopback);
+            using var blackholes = new BlackholeServer(
+                healthyServer.Port,
+                firstAddress,
+                secondAddress);
+            var config = AlternatorConfig.builder()
+                .withSeedHosts(new[] { "slow.example.com", "healthy.example.com" })
+                .withScheme("http")
+                .withPort(healthyServer.Port)
+                .withRoutingScope(ClusterScope.create())
+                .withConnectionTimeoutMs(600)
+                .withHttpClientTimeoutMs(600)
+                .build();
+            var liveNodes = new AddressMappedLiveNodes(
+                config,
+                () => new[] { firstAddress, secondAddress },
+                () => new[] { IPAddress.Loopback });
+
+            try
+            {
+                var stopwatch = Stopwatch.StartNew();
+                InvokeUpdateLiveNodes(liveNodes);
+                stopwatch.Stop();
+                healthyServer.WaitForRequests();
+
+                Assert.That(stopwatch.Elapsed, Is.LessThan(TimeSpan.FromMilliseconds(900)));
+                Assert.That(blackholes.AcceptedConnections, Is.EqualTo(2));
+                Assert.That(liveNodes.ResolutionCount, Is.EqualTo(2));
+                Assert.That(
+                    liveNodes.getLiveNodes().Select(node => node.Host),
+                    Is.EqualTo(new[]
+                    {
+                        "healthy-node.example.com",
+                        "slow.example.com",
+                        "healthy.example.com",
+                    }));
+            }
+            finally
+            {
+                liveNodes.ShutdownAndWait();
+            }
+        }
+
+        [Test]
+        public void ManyDnsAddressesCannotConsumeLaterSeedsUsefulDeadlineShareTest()
+        {
+            var blackholeAddresses = Enumerable.Range(2, 6)
+                .Select(index => IPAddress.Parse($"127.0.0.{index}"))
+                .ToArray();
+            using var healthyServer = new LocalNodesServer(
+                1,
+                _ => LocalNodesServer.HttpDelayedValid,
+                IPAddress.Loopback);
+            using var blackholes = new BlackholeServer(
+                healthyServer.Port,
+                blackholeAddresses);
+            var config = AlternatorConfig.builder()
+                .withSeedHosts(new[] { "many-addresses.example.com", "healthy.example.com" })
+                .withScheme("http")
+                .withPort(healthyServer.Port)
+                .withRoutingScope(ClusterScope.create())
+                .withConnectionTimeoutMs(800)
+                .withHttpClientTimeoutMs(800)
+                .build();
+            var liveNodes = new AddressMappedLiveNodes(
+                config,
+                () => blackholeAddresses,
+                () => new[] { IPAddress.Loopback });
+
+            try
+            {
+                var stopwatch = Stopwatch.StartNew();
+                InvokeUpdateLiveNodes(liveNodes);
+                stopwatch.Stop();
+                healthyServer.WaitForRequests();
+
+                Assert.That(stopwatch.Elapsed, Is.LessThan(TimeSpan.FromMilliseconds(900)));
+                Assert.That(blackholes.AcceptedConnections, Is.EqualTo(blackholeAddresses.Length));
+                Assert.That(
+                    liveNodes.getLiveNodes().Select(node => node.Host),
+                    Is.EqualTo(new[]
+                    {
+                        "healthy-node.example.com",
+                        "many-addresses.example.com",
+                        "healthy.example.com",
+                    }));
+            }
+            finally
+            {
+                liveNodes.ShutdownAndWait();
+            }
+        }
+
+        [Test]
+        public void AggregateDiscoveredNodeLimitRetainsPreviousAtomicSnapshotTest()
+        {
+            var oversizedHosts = Enumerable.Range(0, 5000)
+                .Select(index => $"node-{index}.example.com")
+                .ToArray();
+            var handler = new SequenceDiscoveryHttpMessageHandler(
+                () => JsonResponse("[\"stable.example.com\"]"),
+                () => JsonResponse("[\"stable.example.com\"]"),
+                () => throw new HttpRequestException("learned node became unavailable"),
+                () => JsonResponse(JsonSerializer.Serialize(oversizedHosts)),
+                () => JsonResponse("[\"other.example.com\"]"));
+            using var pollingHttpClient = new HttpClient(handler);
+            var config = AlternatorConfig.builder()
+                .withSeedHosts(new[] { "seed-one.example.com", "seed-two.example.com" })
+                .withScheme("http")
+                .withPort(8000)
+                .withRoutingScope(ClusterScope.create())
+                .build();
+            var liveNodes = new AlternatorLiveNodes(config, pollingHttpClient);
+
+            InvokeUpdateLiveNodes(liveNodes);
+            InvokeUpdateLiveNodes(liveNodes);
+
+            Assert.That(
+                liveNodes.getLiveNodes().Select(node => node.Host),
+                Is.EqualTo(new[] { "stable.example.com" }));
+        }
+
+        [Test]
+        public void AggregateDiscoveryResponseByteLimitRetainsPreviousAtomicSnapshotTest()
+        {
+            var repeatedHosts = Enumerable.Repeat("duplicate.example.com", 28000).ToArray();
+            var largeResponse = JsonSerializer.Serialize(repeatedHosts);
+            Assert.That(Encoding.UTF8.GetByteCount(largeResponse), Is.LessThan(1024 * 1024));
+            Assert.That(Encoding.UTF8.GetByteCount(largeResponse) * 2, Is.GreaterThan(1024 * 1024));
+            var handler = new SequenceDiscoveryHttpMessageHandler(
+                () => JsonResponse("[\"stable.example.com\"]"),
+                () => JsonResponse("[\"stable.example.com\"]"),
+                () => throw new HttpRequestException("learned node became unavailable"),
+                () => JsonResponse(largeResponse),
+                () => JsonResponse(largeResponse));
+            using var pollingHttpClient = new HttpClient(handler);
+            var config = AlternatorConfig.builder()
+                .withSeedHosts(new[] { "seed-one.example.com", "seed-two.example.com" })
+                .withScheme("http")
+                .withPort(8000)
+                .withRoutingScope(ClusterScope.create())
+                .build();
+            var liveNodes = new AlternatorLiveNodes(config, pollingHttpClient);
+
+            InvokeUpdateLiveNodes(liveNodes);
+            InvokeUpdateLiveNodes(liveNodes);
+
+            Assert.That(
+                liveNodes.getLiveNodes().Select(node => node.Host),
+                Is.EqualTo(new[] { "stable.example.com" }));
         }
 
         [Test]
@@ -256,6 +652,287 @@ namespace ScyllaDB.Alternator
                 Is.EqualTo(new[] { "dc2-node1.example.com", "dc1-node1.example.com" }));
             Assert.That(handler.RequestedUris.Select(uri => uri.AbsolutePath), Is.All.EqualTo("/localnodes"));
             Assert.That(handler.RequestedUris.Select(uri => uri.Query), Is.All.EqualTo("?dc=dc1&rack=rack1"));
+        }
+
+        [Test]
+        public void ScopedSeedRemainsDiscoveryOnlyUntilScopeValidationTest()
+        {
+            var handler = new DiscoveryHttpMessageHandler(new Dictionary<string, string>
+            {
+                ["seed.example.com"] = "[]",
+            });
+            using var pollingHttpClient = new HttpClient(handler);
+            var config = AlternatorConfig.builder()
+                .withSeedHost("seed.example.com")
+                .withScheme("http")
+                .withPort(8000)
+                .withRoutingScope(DatacenterScope.of("missing", null))
+                .build();
+            var liveNodes = new AlternatorLiveNodes(config, pollingHttpClient);
+
+            Assert.That(liveNodes.getLiveNodes(), Is.Empty);
+            Assert.That(liveNodes.getActiveNodes(), Is.Empty);
+            Assert.Throws<InvalidOperationException>(() => InvokeNextAsUriWithoutRefresh(liveNodes));
+
+            InvokeUpdateLiveNodes(liveNodes);
+
+            Assert.That(handler.RequestedUris.Select(uri => uri.Host), Is.EqualTo(new[] { "seed.example.com" }));
+            Assert.That(liveNodes.getLiveNodes(), Is.Empty);
+            Assert.That(liveNodes.getActiveNodes(), Is.Empty);
+            Assert.Throws<InvalidOperationException>(() => InvokeNextAsUriWithoutRefresh(liveNodes));
+        }
+
+        [Test]
+        public void ClusterFallbackAuthorizesSeedRoutingDuringInitializationTest()
+        {
+            var config = AlternatorConfig.builder()
+                .withSeedHost("seed.example.com")
+                .withScheme("http")
+                .withPort(8000)
+                .withRoutingScope(DatacenterScope.of("dc1", ClusterScope.create()))
+                .build();
+            using var pollingHttpClient = new HttpClient(new TrackingHttpMessageHandler("[]"));
+            var liveNodes = new AlternatorLiveNodes(config, pollingHttpClient);
+
+            Assert.That(
+                liveNodes.getLiveNodes(),
+                Is.EqualTo(new[] { new Uri("http://seed.example.com:8000") }));
+            Assert.That(
+                InvokeNextAsUriWithoutRefresh(liveNodes),
+                Is.EqualTo(new Uri("http://seed.example.com:8000")));
+        }
+
+        [Test]
+        public void RoutingScopeCycleIsRejectedByReferenceIdentityTest()
+        {
+            var scope = new MutableRoutingScope("dc=dc1");
+            scope.Fallback = scope;
+            var config = AlternatorConfig.builder()
+                .withSeedHost("seed.example.com")
+                .withScheme("http")
+                .withPort(8000)
+                .withRoutingScope(scope)
+                .build();
+            using var pollingHttpClient = new HttpClient(new TrackingHttpMessageHandler("[]"));
+
+            var exception = Assert.Throws<SystemException>(() =>
+                _ = new AlternatorLiveNodes(config, pollingHttpClient));
+
+            Assert.That(exception!.Message, Does.Contain("routing scope").IgnoreCase);
+        }
+
+        [Test]
+        public void RoutingScopeDepthIsBoundedTest()
+        {
+            var scopes = Enumerable.Range(0, 40)
+                .Select(index => new MutableRoutingScope($"dc=dc{index}"))
+                .ToArray();
+            for (var i = 0; i < scopes.Length - 1; i++)
+            {
+                scopes[i].Fallback = scopes[i + 1];
+            }
+
+            var config = AlternatorConfig.builder()
+                .withSeedHost("seed.example.com")
+                .withScheme("http")
+                .withPort(8000)
+                .withRoutingScope(scopes[0])
+                .build();
+            using var pollingHttpClient = new HttpClient(new TrackingHttpMessageHandler("[]"));
+
+            var exception = Assert.Throws<SystemException>(() =>
+                _ = new AlternatorLiveNodes(config, pollingHttpClient));
+
+            Assert.That(exception!.Message, Does.Contain("routing scope").IgnoreCase);
+        }
+
+        [Test]
+        public void CustomUnscopedRoutingScopeUsesCompleteClusterUnionSemanticsTest()
+        {
+            var scope = new MutableRoutingScope(string.Empty);
+            var handler = new DiscoveryHttpMessageHandler(new Dictionary<string, string>
+            {
+                ["seed-one.example.com"] = "[\"node-one.example.com\"]",
+                ["seed-two.example.com"] = "[\"node-two.example.com\"]",
+            });
+            using var pollingHttpClient = new HttpClient(handler);
+            var config = AlternatorConfig.builder()
+                .withSeedHosts(new[] { "seed-one.example.com", "seed-two.example.com" })
+                .withScheme("http")
+                .withPort(8000)
+                .withRoutingScope(scope)
+                .build();
+            var liveNodes = new AlternatorLiveNodes(config, pollingHttpClient);
+
+            Assert.That(liveNodes.getLiveNodes(), Has.Count.EqualTo(2));
+            InvokeUpdateLiveNodes(liveNodes);
+
+            Assert.That(
+                liveNodes.getLiveNodes().Select(node => node.Host),
+                Is.EqualTo(new[] { "node-one.example.com", "node-two.example.com" }));
+        }
+
+        [Test]
+        public void DynamicallyIntroducedRoutingScopeCycleDoesNotBusyLoopTest()
+        {
+            var scope = new MutableRoutingScope("dc=dc1");
+            var handler = new TrackingHttpMessageHandler("[]");
+            using var pollingHttpClient = new HttpClient(handler);
+            var config = AlternatorConfig.builder()
+                .withSeedHost("seed.example.com")
+                .withScheme("http")
+                .withPort(8000)
+                .withRoutingScope(scope)
+                .withIdleRefreshIntervalMs(50)
+                .build();
+            var liveNodes = new AlternatorLiveNodes(config, pollingHttpClient);
+
+            liveNodes.Start().GetAwaiter().GetResult();
+            scope.Fallback = scope;
+            Thread.Sleep(150);
+
+            Assert.That(liveNodes.ShutdownAndWait(2000), Is.True);
+            Assert.That(handler.SendCount, Is.LessThanOrEqualTo(1));
+        }
+
+        [Test]
+        public void AuthoritativeScopedEmptyRefreshClearsPriorSnapshotAndHealthTest()
+        {
+            var handler = new SequenceDiscoveryHttpMessageHandler(
+                () => JsonResponse("[\"seed.example.com\"]"),
+                () => JsonResponse("[]"));
+            using var pollingHttpClient = new HttpClient(handler);
+            var config = AlternatorConfig.builder()
+                .withSeedHost("seed.example.com")
+                .withScheme("http")
+                .withPort(8000)
+                .withRoutingScope(DatacenterScope.of("dc1", null))
+                .build();
+            var liveNodes = new AlternatorLiveNodes(config, pollingHttpClient);
+
+            InvokeUpdateLiveNodes(liveNodes);
+            Assert.That(liveNodes.getLiveNodes(), Has.Count.EqualTo(1));
+
+            InvokeUpdateLiveNodes(liveNodes);
+
+            Assert.That(liveNodes.getLiveNodes(), Is.Empty);
+            Assert.That(liveNodes.getActiveNodes(), Is.Empty);
+            Assert.That(liveNodes.getNodeStatus(new Uri("http://seed.example.com:8000")), Is.Null);
+        }
+
+        [Test]
+        public void PrimaryEmptyWithFallbackFailureRetainsFallbackPublishedSnapshotTest()
+        {
+            var handler = new SequenceDiscoveryHttpMessageHandler(
+                () => JsonResponse("[]"),
+                () => JsonResponse("[\"fallback.example.com\"]"),
+                () => JsonResponse("[]"),
+                () => JsonResponse("[]"),
+                () => throw new HttpRequestException("fallback live node unavailable"),
+                () => throw new HttpRequestException("fallback seed unavailable"));
+            using var pollingHttpClient = new HttpClient(handler);
+            var fallback = DatacenterScope.of("dc2", null);
+            var config = AlternatorConfig.builder()
+                .withSeedHost("seed.example.com")
+                .withScheme("http")
+                .withPort(8000)
+                .withRoutingScope(DatacenterScope.of("dc1", fallback))
+                .build();
+            var liveNodes = new AlternatorLiveNodes(config, pollingHttpClient);
+
+            InvokeUpdateLiveNodes(liveNodes);
+            Assert.That(
+                liveNodes.getLiveNodes().Select(node => node.Host),
+                Is.EqualTo(new[] { "fallback.example.com" }));
+
+            InvokeUpdateLiveNodes(liveNodes);
+
+            Assert.That(
+                liveNodes.getLiveNodes().Select(node => node.Host),
+                Is.EqualTo(new[] { "fallback.example.com" }));
+        }
+
+        [Test]
+        public void PrimaryEmptyWithFallbackFailureClearsPrimaryPublishedSnapshotTest()
+        {
+            var handler = new SequenceDiscoveryHttpMessageHandler(
+                () => JsonResponse("[\"primary.example.com\"]"),
+                () => JsonResponse("[]"),
+                () => JsonResponse("[]"),
+                () => throw new HttpRequestException("fallback live node unavailable"),
+                () => throw new HttpRequestException("fallback seed unavailable"));
+            using var pollingHttpClient = new HttpClient(handler);
+            var fallback = DatacenterScope.of("dc2", null);
+            var config = AlternatorConfig.builder()
+                .withSeedHost("seed.example.com")
+                .withScheme("http")
+                .withPort(8000)
+                .withRoutingScope(DatacenterScope.of("dc1", fallback))
+                .build();
+            var liveNodes = new AlternatorLiveNodes(config, pollingHttpClient);
+
+            InvokeUpdateLiveNodes(liveNodes);
+            Assert.That(
+                liveNodes.getLiveNodes().Select(node => node.Host),
+                Is.EqualTo(new[] { "primary.example.com" }));
+
+            InvokeUpdateLiveNodes(liveNodes);
+
+            Assert.That(liveNodes.getLiveNodes(), Is.Empty);
+            Assert.That(liveNodes.getActiveNodes(), Is.Empty);
+        }
+
+        [Test]
+        public void ClusterEmptyRefreshRetainsLastKnownGoodSnapshotTest()
+        {
+            var handler = new SequenceDiscoveryHttpMessageHandler(
+                () => JsonResponse("[\"learned.example.com\"]"),
+                () => JsonResponse("[]"),
+                () => JsonResponse("[]"));
+            using var pollingHttpClient = new HttpClient(handler);
+            var config = AlternatorConfig.builder()
+                .withSeedHost("seed.example.com")
+                .withScheme("http")
+                .withPort(8000)
+                .withRoutingScope(ClusterScope.create())
+                .build();
+            var liveNodes = new AlternatorLiveNodes(config, pollingHttpClient);
+
+            InvokeUpdateLiveNodes(liveNodes);
+            InvokeUpdateLiveNodes(liveNodes);
+
+            Assert.That(
+                liveNodes.getLiveNodes().Select(node => node.Host),
+                Is.EqualTo(new[] { "learned.example.com" }));
+            var learnedStatus = liveNodes.getNodeStatus(new Uri("http://learned.example.com:8000"));
+            Assert.That(learnedStatus, Is.Not.Null);
+            Assert.That(
+                learnedStatus!.State,
+                Is.EqualTo(NodeHealthState.Active));
+        }
+
+        [Test]
+        public void FeatureSupportProbeRetriesLaterDiscoverySeedTest()
+        {
+            var handler = new FeatureProbeHttpMessageHandler("broken.example.com");
+            using var pollingHttpClient = new HttpClient(handler);
+            var config = AlternatorConfig.builder()
+                .withSeedHosts(new[] { "broken.example.com", "healthy.example.com" })
+                .withScheme("http")
+                .withPort(8000)
+                .withRoutingScope(ClusterScope.create())
+                .build();
+            var liveNodes = new AlternatorLiveNodes(config, pollingHttpClient);
+
+            Assert.That(liveNodes.CheckIfRoutingScopeFeatureIsSupported(), Is.True);
+            Assert.That(
+                handler.RequestedUris.Select(uri => (uri.Host, uri.Query)),
+                Is.EqualTo(new[]
+                {
+                    ("broken.example.com", "?rack=fakeRack"),
+                    ("healthy.example.com", "?rack=fakeRack"),
+                    ("healthy.example.com", string.Empty),
+                }));
         }
 
         [Test]
@@ -435,6 +1112,116 @@ namespace ScyllaDB.Alternator
                 Assert.That(
                     liveNodes.getLiveNodes().Select(node => node.Host),
                     Is.EqualTo(new[] { "127.0.0.9" }));
+            }
+            finally
+            {
+                liveNodes.shutdownAndWait();
+            }
+        }
+
+        [Test]
+        public void DnsAddressFallbackRejectsRedirectAndTriesNextAddressTest()
+        {
+            var redirectingAddress = IPAddress.Parse("127.0.0.2");
+            var reachableAddress = IPAddress.Loopback;
+            using var server = new LocalNodesServer(
+                2,
+                request => request.LocalAddress.Equals(redirectingAddress)
+                    ? request.Target == "/localnodes"
+                        ? LocalNodesServer.HttpRedirect
+                        : "[\"127.0.0.20\"]"
+                    : "[\"127.0.0.21\"]");
+            var config = AlternatorConfig.builder()
+                .withSeedHost("entrypoint.test")
+                .withScheme("http")
+                .withPort(server.Port)
+                .withRoutingScope(ClusterScope.create())
+                .build();
+            var liveNodes = new AddressMappedLiveNodes(
+                config,
+                () => new[] { redirectingAddress, reachableAddress });
+            try
+            {
+                InvokeUpdateLiveNodes(liveNodes);
+                server.WaitForRequests();
+
+                Assert.That(
+                    server.Requests.Select(request => request.LocalAddress),
+                    Is.EqualTo(new[] { redirectingAddress, reachableAddress }));
+                Assert.That(
+                    server.Requests.Select(request => request.Target),
+                    Is.All.EqualTo("/localnodes"));
+                Assert.That(
+                    liveNodes.getLiveNodes().Select(node => node.Host),
+                    Is.EqualTo(new[] { "127.0.0.21" }));
+            }
+            finally
+            {
+                liveNodes.shutdownAndWait();
+            }
+        }
+
+        [Test]
+        public void OversizedLocalNodesResponseFallsBackWithoutPublishingPartialDataTest()
+        {
+            var oversizedResponse = "[\"127.0.0.22\"]" + new string(' ', (1024 * 1024) + 1);
+            var handler = new DiscoveryHttpMessageHandler(new Dictionary<string, string>
+            {
+                ["oversized.example.com"] = oversizedResponse,
+                ["healthy.example.com"] = "[\"127.0.0.23\"]",
+            });
+            using var pollingHttpClient = new HttpClient(handler);
+            var config = AlternatorConfig.builder()
+                .withSeedHosts(new[] { "oversized.example.com", "healthy.example.com" })
+                .withScheme("http")
+                .withPort(8000)
+                .withRoutingScope(ClusterScope.create())
+                .build();
+            var liveNodes = new AlternatorLiveNodes(config, pollingHttpClient);
+
+            InvokeUpdateLiveNodes(liveNodes);
+
+            Assert.That(
+                handler.RequestedUris.Select(uri => uri.Host),
+                Is.EqualTo(new[] { "oversized.example.com", "healthy.example.com" }));
+            Assert.That(
+                liveNodes.getLiveNodes().Select(node => node.Host),
+                Is.EqualTo(new[]
+                {
+                    "127.0.0.23",
+                    "oversized.example.com",
+                    "healthy.example.com",
+                }));
+        }
+
+        [Test]
+        public void FaultedCachedAddressClientIsEvictedAndLaterRefreshRecoversTest()
+        {
+            using var server = new LocalNodesServer(1, _ => "[\"127.0.0.24\"]");
+            var config = AlternatorConfig.builder()
+                .withSeedHost("entrypoint.test")
+                .withScheme("http")
+                .withPort(server.Port)
+                .withRoutingScope(ClusterScope.create())
+                .build();
+            var liveNodes = new AddressMappedLiveNodes(config, () => new[] { IPAddress.Loopback });
+            InjectFaultedAddressClient(
+                liveNodes,
+                IPAddress.Loopback,
+                new Uri($"http://entrypoint.test:{server.Port}"));
+            try
+            {
+                InvokeUpdateLiveNodes(liveNodes);
+                Assert.That(
+                    liveNodes.getLiveNodes().Select(node => node.Host),
+                    Is.EqualTo(new[] { "entrypoint.test" }));
+
+                InvokeUpdateLiveNodes(liveNodes);
+                server.WaitForRequests();
+
+                Assert.That(
+                    liveNodes.getLiveNodes().Select(node => node.Host),
+                    Is.EqualTo(new[] { "127.0.0.24" }));
             }
             finally
             {
@@ -693,7 +1480,6 @@ namespace ScyllaDB.Alternator
         {
             var handler = new SequenceDiscoveryHttpMessageHandler(
                 () => JsonResponse("[\"learned-old.example.com\"]"),
-                () => throw new HttpRequestException("simulated learned-node outage"),
                 () => throw new HttpRequestException("simulated seed outage"),
                 () => throw new HttpRequestException("simulated learned-node outage"),
                 () => JsonResponse("[\"learned-new.example.com\"]"));
@@ -718,7 +1504,7 @@ namespace ScyllaDB.Alternator
 
             InvokeUpdateLiveNodes(liveNodes);
 
-            Assert.That(liveNodes.getLiveNodes(), Is.EqualTo(new[] { newNode }));
+            Assert.That(liveNodes.getLiveNodes(), Is.EqualTo(new[] { newNode, oldNode }));
             Assert.That(liveNodes.getActiveNodes(), Is.EqualTo(new[] { newNode }));
             Assert.That(InvokeNextAsUriWithoutRefresh(liveNodes), Is.EqualTo(newNode));
             Assert.That(
@@ -726,11 +1512,47 @@ namespace ScyllaDB.Alternator
                 Is.EqualTo(new[]
                 {
                     "entrypoint.test",
-                    "learned-old.example.com",
                     "entrypoint.test",
                     "learned-old.example.com",
                     "entrypoint.test",
+                    "learned-old.example.com",
                 }));
+        }
+
+        [Test]
+        public void AllDownRoutingFailsFastWhileSeedRecoveryRunsInBackgroundTest()
+        {
+            var handler = new CancellableBlockingHttpMessageHandler();
+            using var pollingHttpClient = new HttpClient(handler);
+            var config = AlternatorConfig.builder()
+                .withSeedHost("127.0.0.1")
+                .withScheme("http")
+                .withPort(8000)
+                .withRoutingScope(ClusterScope.create())
+                .withActiveRefreshIntervalMs(10)
+                .withIdleRefreshIntervalMs(10000)
+                .build();
+            var liveNodes = new AlternatorLiveNodes(config, pollingHttpClient);
+            var seed = new Uri("http://127.0.0.1:8000");
+            liveNodes.reportNodeResult(seed, NodeHealthObservation.ConnectionFailure);
+            Exception? routingFailure = null;
+
+            var routing = Task.Run(() =>
+            {
+                try
+                {
+                    _ = liveNodes.nextAsURI();
+                }
+                catch (Exception e)
+                {
+                    routingFailure = e;
+                }
+            });
+
+            Assert.That(handler.WaitForRequest(TimeSpan.FromSeconds(5)), Is.True);
+            Assert.That(routing.Wait(TimeSpan.FromMilliseconds(500)), Is.True);
+            Assert.That(routingFailure, Is.TypeOf<InvalidOperationException>());
+            Assert.That(liveNodes.ShutdownAndWait(2000), Is.True);
         }
 
         [Test]
@@ -762,10 +1584,16 @@ namespace ScyllaDB.Alternator
                     "entrypoint.test",
                     "live-one.example.com",
                     "live-two.example.com",
+                    "entrypoint.test",
                 }));
             Assert.That(
                 liveNodes.getLiveNodes().Select(node => node.Host),
-                Is.EqualTo(new[] { "live-two.example.com", "live-three.example.com" }));
+                Is.EqualTo(new[]
+                {
+                    "live-two.example.com",
+                    "live-three.example.com",
+                    "live-one.example.com",
+                }));
         }
 
         [Test]
@@ -815,7 +1643,7 @@ namespace ScyllaDB.Alternator
                     }));
                 Assert.That(
                     liveNodes.getLiveNodes().Select(node => node.Host),
-                    Is.EqualTo(new[] { "learned-new.example.com" }));
+                    Is.EqualTo(new[] { "learned-new.example.com", failedLearnedAddress.ToString() }));
             }
             finally
             {
@@ -946,6 +1774,66 @@ namespace ScyllaDB.Alternator
         }
 
         [Test]
+        public void OlderRefreshCannotOverwriteNewerCompletedGenerationTest()
+        {
+            var handler = new OutOfOrderDiscoveryHttpMessageHandler();
+            using var pollingHttpClient = new HttpClient(handler);
+            var config = AlternatorConfig.builder()
+                .withSeedHost("entrypoint.test")
+                .withScheme("http")
+                .withPort(8000)
+                .withRoutingScope(ClusterScope.create())
+                .build();
+            var liveNodes = new AlternatorLiveNodes(config, pollingHttpClient);
+
+            var olderRefresh = Task.Run(() => InvokeUpdateLiveNodes(liveNodes));
+            Assert.That(handler.WaitForFirstRequest(TimeSpan.FromSeconds(5)), Is.True);
+            var newerRefresh = Task.Run(() => InvokeUpdateLiveNodes(liveNodes));
+            Assert.That(handler.WaitForSecondRequest(TimeSpan.FromSeconds(5)), Is.True);
+
+            handler.ReleaseSecondRequest();
+            Assert.That(newerRefresh.Wait(TimeSpan.FromSeconds(5)), Is.True);
+            Assert.That(
+                liveNodes.getLiveNodes().Select(node => node.Host),
+                Is.EqualTo(new[] { "new.example.com" }));
+
+            handler.ReleaseFirstRequest();
+            Assert.That(olderRefresh.Wait(TimeSpan.FromSeconds(5)), Is.True);
+            Assert.That(
+                liveNodes.getLiveNodes().Select(node => node.Host),
+                Is.EqualTo(new[] { "new.example.com" }));
+        }
+
+        [Test]
+        public void OlderRefreshFailureCannotPoisonNewerGenerationHealthTest()
+        {
+            var handler = new OutOfOrderDiscoveryHttpMessageHandler(firstRequestFails: true);
+            using var pollingHttpClient = new HttpClient(handler);
+            var config = AlternatorConfig.builder()
+                .withSeedHost("entrypoint.test")
+                .withScheme("http")
+                .withPort(8000)
+                .withRoutingScope(ClusterScope.create())
+                .build();
+            var liveNodes = new AlternatorLiveNodes(config, pollingHttpClient);
+            var seed = new Uri("http://entrypoint.test:8000");
+
+            var olderRefresh = Task.Run(() => InvokeUpdateLiveNodes(liveNodes));
+            Assert.That(handler.WaitForFirstRequest(TimeSpan.FromSeconds(5)), Is.True);
+            var newerRefresh = Task.Run(() => InvokeUpdateLiveNodes(liveNodes));
+            Assert.That(handler.WaitForSecondRequest(TimeSpan.FromSeconds(5)), Is.True);
+
+            handler.ReleaseSecondRequest();
+            Assert.That(newerRefresh.Wait(TimeSpan.FromSeconds(5)), Is.True);
+            handler.ReleaseFirstRequest();
+            Assert.That(olderRefresh.Wait(TimeSpan.FromSeconds(5)), Is.True);
+
+            Assert.That(liveNodes.getLiveNodes(), Is.EqualTo(new[] { seed }));
+            Assert.That(liveNodes.getActiveNodes(), Is.EqualTo(new[] { seed }));
+            Assert.That(liveNodes.getDownNodes(), Is.Empty);
+        }
+
+        [Test]
         public void FailedRefreshKeepsLastLearnedNodesTest()
         {
             using var server = new LocalNodesServer(1, _ => "[\"::2\"]", IPAddress.IPv6Loopback);
@@ -967,6 +1855,224 @@ namespace ScyllaDB.Alternator
             Assert.That(
                 liveNodes.getLiveNodes().Select(node => node.Host),
                 Is.EqualTo(new[] { "[::2]" }));
+        }
+
+        [Test]
+        public void MalformedSuccessfulResponseDoesNotReviveDownNodeTest()
+        {
+            var handler = new TrackingHttpMessageHandler("not-json");
+            using var pollingHttpClient = new HttpClient(handler);
+            var config = AlternatorConfig.builder()
+                .withSeedHost("127.0.0.1")
+                .withScheme("http")
+                .withPort(8000)
+                .withRoutingScope(ClusterScope.create())
+                .build();
+            var liveNodes = new AlternatorLiveNodes(config, pollingHttpClient);
+            var seed = new Uri("http://127.0.0.1:8000");
+            liveNodes.reportNodeResult(seed, NodeHealthObservation.ConnectionFailure);
+
+            InvokeUpdateLiveNodes(liveNodes);
+
+            Assert.That(liveNodes.getDownNodes(), Is.EqualTo(new[] { seed }));
+            Assert.That(liveNodes.getQuarantinedNodes(), Is.Empty);
+            Assert.That(liveNodes.getLiveNodes(), Is.EqualTo(new[] { seed }));
+        }
+
+        [TestCase("")]
+        [TestCase(" ")]
+        [TestCase("bad..name")]
+        [TestCase(".bad.example")]
+        [TestCase("-bad.example")]
+        [TestCase("bad-.example")]
+        [TestCase("user@example.com")]
+        [TestCase("example.com/path")]
+        [TestCase("example.com?query")]
+        [TestCase("example.com#fragment")]
+        [TestCase("example.com\\path")]
+        [TestCase("example.com:8000")]
+        [TestCase("[::1]")]
+        [TestCase("999.999.999.999")]
+        [TestCase("127.1")]
+        [TestCase("2130706433")]
+        [TestCase("0177.0.0.1")]
+        [TestCase("127.00.0.1")]
+        [TestCase("0x7f.0.0.1")]
+        [TestCase("0x7f000001")]
+        [TestCase("127.0.0.1.")]
+        [TestCase("１２７.０.０.１")]
+        [TestCase("１２７。０。０。１")]
+        [TestCase("::ffff:127.1")]
+        public void ConfigRejectsNonHostSeedSyntaxTest(string invalidHost)
+        {
+            Assert.Throws<ArgumentException>(() => AlternatorConfig.builder()
+                .withSeedHost(invalidHost)
+                .withScheme("http")
+                .withPort(8000)
+                .build());
+        }
+
+        [TestCase("127.0.0.1")]
+        [TestCase("0.0.0.0")]
+        [TestCase("255.255.255.255")]
+        [TestCase("::1")]
+        [TestCase("::ffff:192.0.2.1")]
+        [TestCase("fe80::1%1")]
+        [TestCase("fe80::1%lo")]
+        [TestCase("example.com.")]
+        [TestCase("münich.example")]
+        [TestCase("localhost")]
+        [TestCase("123.example")]
+        [TestCase("0x7f.example")]
+        [TestCase("node-127-0-0-1.example")]
+        public void ConfigPreservesValidIpDnsIdnAndZoneSeedHostsTest(string host)
+        {
+            var config = AlternatorConfig.builder()
+                .withSeedHost(host)
+                .withScheme("http")
+                .withPort(8000)
+                .withRoutingScope(ClusterScope.create())
+                .build();
+            using var pollingHttpClient = new HttpClient(new TrackingHttpMessageHandler());
+
+            var liveNodes = new AlternatorLiveNodes(config, pollingHttpClient);
+
+            Assert.That(liveNodes.getLiveNodes(), Has.Count.EqualTo(1));
+        }
+
+        [TestCase("http://user@example.com:8000/")]
+        [TestCase("http://example.com:8000/path")]
+        [TestCase("http://example.com:8000/?query")]
+        [TestCase("http://example.com:8000/#fragment")]
+        public void SeedUriRejectsNonAuthorityComponentsTest(string seed)
+        {
+            Assert.Throws<ArgumentException>(() => AlternatorConfig.builder()
+                .withSeedNode(new Uri(seed))
+                .build());
+        }
+
+        [TestCase("http://127.1:8000/")]
+        [TestCase("http://2130706433:8000/")]
+        [TestCase("http://0177.0.0.1:8000/")]
+        [TestCase("http://0x7f000001:8000/")]
+        [TestCase("http://127.0.0.1.:8000/")]
+        public void SeedUriRejectsLegacyIpv4AliasesBeforeUriCanonicalizationTest(string seed)
+        {
+            Assert.Throws<ArgumentException>(() => AlternatorConfig.builder()
+                .withSeedNode(seed)
+                .build());
+            Assert.Throws<ArgumentException>(() => AlternatorConfig.builder()
+                .withSeedNode(new Uri(seed))
+                .build());
+        }
+
+        [TestCase("127.1")]
+        [TestCase("2130706433")]
+        [TestCase("0177.0.0.1")]
+        [TestCase("0x7f.0.0.1")]
+        [TestCase("0x7f000001")]
+        [TestCase("127.0.0.1.")]
+        [TestCase("１２７.０.０.１")]
+        public void LocalNodesRejectsLegacyIpv4AliasesTest(string alias)
+        {
+            var handler = new TrackingHttpMessageHandler(JsonSerializer.Serialize(new[] { alias }));
+            using var pollingHttpClient = new HttpClient(handler);
+            var config = AlternatorConfig.builder()
+                .withSeedHost("seed.example.com")
+                .withScheme("http")
+                .withPort(8000)
+                .withRoutingScope(ClusterScope.create())
+                .build();
+            var liveNodes = new AlternatorLiveNodes(config, pollingHttpClient);
+
+            InvokeUpdateLiveNodes(liveNodes);
+
+            Assert.That(
+                liveNodes.getLiveNodes().Select(node => node.Host),
+                Is.EqualTo(new[] { "seed.example.com" }));
+        }
+
+        [TestCase("http://[::1]:8000/")]
+        [TestCase("http://[fe80::1%251]:8000/")]
+        [TestCase("http://münich.example.:8000/")]
+        public void SeedUriPreservesValidIpv6ZoneAndIdnAuthoritiesTest(string seed)
+        {
+            var config = AlternatorConfig.builder()
+                .withSeedNode(new Uri(seed))
+                .withRoutingScope(ClusterScope.create())
+                .build();
+            using var pollingHttpClient = new HttpClient(new TrackingHttpMessageHandler());
+
+            var liveNodes = new AlternatorLiveNodes(config, pollingHttpClient);
+
+            Assert.That(liveNodes.getLiveNodes(), Has.Count.EqualTo(1));
+        }
+
+        [Test]
+        public void LegacyUriListConstructorRejectsNonAuthorityNodesTest()
+        {
+            Assert.Throws<ArgumentException>(() => _ = new AlternatorLiveNodes(
+                new List<Uri> { new Uri("http://example.com:8000/path") },
+                "http",
+                8000,
+                string.Empty,
+                string.Empty));
+        }
+
+        [Test]
+        public void InvalidDnsLabelFromOneSeedFallsThroughToLaterSeedTest()
+        {
+            var handler = new DiscoveryHttpMessageHandler(new Dictionary<string, string>
+            {
+                ["bad-seed.example.com"] = "[\"bad..name\"]",
+                ["good-seed.example.com"] = "[\"valid.example.com\"]",
+            });
+            using var pollingHttpClient = new HttpClient(handler);
+            var config = AlternatorConfig.builder()
+                .withSeedHosts(new[] { "bad-seed.example.com", "good-seed.example.com" })
+                .withScheme("http")
+                .withPort(8000)
+                .withRoutingScope(DatacenterScope.of("dc1", null))
+                .build();
+            var liveNodes = new AlternatorLiveNodes(config, pollingHttpClient);
+
+            InvokeUpdateLiveNodes(liveNodes);
+
+            Assert.That(
+                handler.RequestedUris.Select(uri => uri.Host),
+                Is.EqualTo(new[] { "bad-seed.example.com", "good-seed.example.com" }));
+            Assert.That(
+                liveNodes.getLiveNodes().Select(node => node.Host),
+                Is.EqualTo(new[] { "valid.example.com" }));
+        }
+
+        [Test]
+        public void InvalidUtf8FromFirstDnsAddressFallsThroughToLaterAddressTest()
+        {
+            using var server = new LocalNodesServer(
+                2,
+                request => request.LocalAddress.Equals(IPAddress.Parse("127.0.0.2"))
+                    ? LocalNodesServer.HttpInvalidUtf8
+                    : "[\"valid.example.com\"]");
+            var config = AlternatorConfig.builder()
+                .withSeedHost("logical.test")
+                .withScheme("http")
+                .withPort(server.Port)
+                .withRoutingScope(ClusterScope.create())
+                .build();
+            var liveNodes = new AddressMappedLiveNodes(
+                config,
+                () => new[] { IPAddress.Parse("127.0.0.2"), IPAddress.Loopback });
+
+            InvokeUpdateLiveNodes(liveNodes);
+            server.WaitForRequests();
+
+            Assert.That(
+                server.Requests.Select(request => request.LocalAddress),
+                Is.EqualTo(new[] { IPAddress.Parse("127.0.0.2"), IPAddress.Loopback }));
+            Assert.That(
+                liveNodes.getLiveNodes().Select(node => node.Host),
+                Is.EqualTo(new[] { "valid.example.com" }));
         }
 
         [Test]
@@ -1067,7 +2173,7 @@ namespace ScyllaDB.Alternator
             InvokeUpdateLiveNodes(liveNodes);
             liveNodes.shutdown();
 
-            Assert.That(handler.SendCount, Is.EqualTo(2));
+            Assert.That(handler.SendCount, Is.EqualTo(3));
             Assert.That(handler.DisposeCount, Is.EqualTo(0));
             Assert.That(
                 liveNodes.getLiveNodes().Select(node => node.Host),
@@ -1098,6 +2204,101 @@ namespace ScyllaDB.Alternator
             Assert.That(liveNodes.isRunning(), Is.False);
             Assert.That(handler.DisposeCount, Is.EqualTo(0));
             Assert.That(handler.SendCount, Is.GreaterThanOrEqualTo(1));
+        }
+
+        [Test]
+        public void ShutdownCancelsInFlightDiscoveryRequestTest()
+        {
+            var handler = new CancellableBlockingHttpMessageHandler();
+            using var pollingHttpClient = new HttpClient(handler);
+            var config = AlternatorConfig.builder()
+                .withSeedHost("127.0.0.1")
+                .withScheme("http")
+                .withPort(8000)
+                .withRoutingScope(ClusterScope.create())
+                .withActiveRefreshIntervalMs(10)
+                .withIdleRefreshIntervalMs(10000)
+                .build();
+            var liveNodes = new AlternatorLiveNodes(config, pollingHttpClient);
+
+            liveNodes.start().GetAwaiter().GetResult();
+            _ = liveNodes.nextAsURI();
+            Assert.That(handler.WaitForRequest(TimeSpan.FromSeconds(5)), Is.True);
+
+            var stopwatch = Stopwatch.StartNew();
+            Assert.That(liveNodes.ShutdownAndWait(2000), Is.True);
+            stopwatch.Stop();
+
+            Assert.That(stopwatch.Elapsed, Is.LessThan(TimeSpan.FromSeconds(2)));
+            Assert.That(handler.WaitForCancellation(TimeSpan.FromSeconds(1)), Is.True);
+            Assert.That(liveNodes.isRunning(), Is.False);
+        }
+
+        [Test]
+        public void ShutdownCancelsSynchronousFeatureDiscoveryTest()
+        {
+            var handler = new CancellableBlockingHttpMessageHandler();
+            using var pollingHttpClient = new HttpClient(handler);
+            var config = AlternatorConfig.builder()
+                .withSeedHost("127.0.0.1")
+                .withScheme("http")
+                .withPort(8000)
+                .withRoutingScope(ClusterScope.create())
+                .build();
+            var liveNodes = new AlternatorLiveNodes(config, pollingHttpClient);
+            var featureCheck = Task.Run(() =>
+                Assert.Throws<AlternatorLiveNodes.FailedToCheck>(() =>
+                    liveNodes.CheckIfRoutingScopeFeatureIsSupported()));
+
+            Assert.That(handler.WaitForRequest(TimeSpan.FromSeconds(5)), Is.True);
+
+            liveNodes.Shutdown();
+
+            Assert.That(featureCheck.Wait(TimeSpan.FromSeconds(2)), Is.True);
+            Assert.That(handler.WaitForCancellation(TimeSpan.FromSeconds(1)), Is.True);
+        }
+
+        [Test]
+        public void DiscoveryTimeoutCancelsStalledResponseBodyTest()
+        {
+            var handler = new BlockingBodyHttpMessageHandler();
+            using var pollingHttpClient = new HttpClient(handler);
+            var config = AlternatorConfig.builder()
+                .withSeedHost("127.0.0.1")
+                .withScheme("http")
+                .withPort(8000)
+                .withRoutingScope(ClusterScope.create())
+                .withHttpClientTimeoutMs(100)
+                .build();
+            var liveNodes = new AlternatorLiveNodes(config, pollingHttpClient);
+
+            var stopwatch = Stopwatch.StartNew();
+            InvokeUpdateLiveNodes(liveNodes);
+            stopwatch.Stop();
+
+            Assert.That(stopwatch.Elapsed, Is.LessThan(TimeSpan.FromSeconds(2)));
+            Assert.That(handler.WaitForBodyRead(TimeSpan.FromSeconds(1)), Is.True);
+            Assert.That(handler.WaitForCancellation(TimeSpan.FromSeconds(1)), Is.True);
+            Assert.That(
+                liveNodes.getLiveNodes(),
+                Is.EqualTo(new[] { new Uri("http://127.0.0.1:8000") }));
+        }
+
+        [Test]
+        public void ShutdownIsTerminalAndRejectsTransportReuseTest()
+        {
+            var config = AlternatorConfig.builder()
+                .withSeedHost("127.0.0.1")
+                .withScheme("http")
+                .withPort(8000)
+                .withRoutingScope(ClusterScope.create())
+                .build();
+            var liveNodes = new AlternatorLiveNodes(config);
+
+            Assert.That(liveNodes.ShutdownAndWait(0), Is.True);
+
+            Assert.Throws<ObjectDisposedException>(() => liveNodes.Start());
+            Assert.Throws<ObjectDisposedException>(() => liveNodes.NextAsUri());
         }
 
         [Test]
@@ -1187,12 +2388,153 @@ namespace ScyllaDB.Alternator
                     () =>
                     {
                         liveNodes.nextAsURI();
-                        return handler.SendCount == 2;
+                        return handler.SendCount >= 3;
                     },
                     TimeSpan.FromSeconds(5)),
                 Is.True);
 
             liveNodes.shutdownAndWait();
+        }
+
+        [Test]
+        public async Task DynamoDbSdkRequestStartsDeferredDiscoveryBeforeIdleRefreshTest()
+        {
+            using var server = new LocalNodesServer(
+                2,
+                request =>
+                {
+                    if (request.Target.StartsWith("/localnodes", StringComparison.Ordinal))
+                    {
+                        Thread.Sleep(100);
+                        return "[\"127.0.0.1\"]";
+                    }
+
+                    return "{\"TableNames\":[]}";
+                },
+                IPAddress.Loopback);
+            using var wrapper = AlternatorDynamoDBClient.builder()
+                .endpointOverride($"http://127.0.0.1:{server.Port}")
+                .withRoutingScope(DatacenterScope.of("dc1", null))
+                .withActiveRefreshIntervalMs(5000)
+                .withIdleRefreshIntervalMs(60000)
+                .ConfigureAws(config =>
+                {
+                    config.MaxErrorRetry = 0;
+                    config.Timeout = TimeSpan.FromSeconds(5);
+                })
+                .WithoutValidation()
+                .WithDeferredStart()
+                .buildWithAlternatorAPI();
+
+            Exception? firstFailure = null;
+            try
+            {
+                await wrapper.getClient().ListTablesAsync();
+            }
+            catch (Exception e)
+            {
+                firstFailure = e;
+            }
+
+            Assert.That(firstFailure, Is.TypeOf<InvalidOperationException>());
+            Assert.That(
+                SpinWait.SpinUntil(() => wrapper.getLiveNodes().Count == 1, TimeSpan.FromSeconds(5)),
+                Is.True);
+
+            var response = await wrapper.getClient().ListTablesAsync();
+            server.WaitForRequests();
+
+            Assert.That(response.TableNames, Is.Empty);
+            Assert.That(
+                server.Requests.Select(request => request.Target),
+                Is.EqualTo(new[] { "/localnodes?dc=dc1", "/" }));
+        }
+
+        [Test]
+        public async Task DynamoDbSdkRequestWakesSeedRecoveryWhenAllPublishedNodesAreDownTest()
+        {
+            using var server = new LocalNodesServer(
+                2,
+                request =>
+                {
+                    if (request.Target.StartsWith("/localnodes", StringComparison.Ordinal))
+                    {
+                        Thread.Sleep(100);
+                        return "[\"127.0.0.1\"]";
+                    }
+
+                    return "{\"TableNames\":[]}";
+                },
+                IPAddress.Loopback);
+            using var wrapper = AlternatorDynamoDBClient.builder()
+                .endpointOverride($"http://127.0.0.1:{server.Port}")
+                .withRoutingScope(ClusterScope.create())
+                .withActiveRefreshIntervalMs(5000)
+                .withIdleRefreshIntervalMs(60000)
+                .ConfigureAws(config =>
+                {
+                    config.MaxErrorRetry = 0;
+                    config.Timeout = TimeSpan.FromSeconds(5);
+                })
+                .WithoutValidation()
+                .WithDeferredStart()
+                .buildWithAlternatorAPI();
+            var liveNodes = wrapper.getAlternatorLiveNodes();
+            liveNodes.reportNodeResult(
+                new Uri($"http://127.0.0.1:{server.Port}"),
+                NodeHealthObservation.ConnectionFailure);
+
+            Exception? firstFailure = null;
+            try
+            {
+                await wrapper.getClient().ListTablesAsync();
+            }
+            catch (Exception e)
+            {
+                firstFailure = e;
+            }
+
+            Assert.That(firstFailure, Is.TypeOf<InvalidOperationException>());
+            Assert.That(
+                SpinWait.SpinUntil(() => liveNodes.getQuarantinedNodes().Count == 1, TimeSpan.FromSeconds(5)),
+                Is.True);
+
+            var response = await wrapper.getClient().ListTablesAsync();
+            server.WaitForRequests();
+
+            Assert.That(response.TableNames, Is.Empty);
+            Assert.That(
+                server.Requests.Select(request => request.Target),
+                Is.EqualTo(new[] { "/localnodes", "/" }));
+        }
+
+        [Test]
+        public void RequestDuringRefreshCooldownSchedulesDeferredUpdateTest()
+        {
+            var handler = new TrackingHttpMessageHandler();
+            using var pollingHttpClient = new HttpClient(handler);
+            var config = AlternatorConfig.builder()
+                .withSeedHost("127.0.0.1")
+                .withScheme("http")
+                .withPort(8080)
+                .withRoutingScope(ClusterScope.create())
+                .withActiveRefreshIntervalMs(200)
+                .withIdleRefreshIntervalMs(10000)
+                .build();
+            var liveNodes = new AlternatorLiveNodes(config, pollingHttpClient);
+
+            liveNodes.start().GetAwaiter().GetResult();
+            _ = liveNodes.nextAsURI();
+            Assert.That(
+                SpinWait.SpinUntil(() => handler.SendCount == 1, TimeSpan.FromSeconds(5)),
+                Is.True);
+
+            _ = liveNodes.nextAsURI();
+
+            Assert.That(
+                SpinWait.SpinUntil(() => handler.SendCount >= 3, TimeSpan.FromSeconds(2)),
+                Is.True);
+            Assert.That(liveNodes.shutdownAndWait(), Is.True);
         }
 
         [Test]
@@ -1243,6 +2585,18 @@ namespace ScyllaDB.Alternator
             method!.Invoke(liveNodes, Array.Empty<object>());
         }
 
+        private static IReadOnlyList<Uri> InvokeMergePartialClusterSnapshot(
+            IReadOnlyList<Uri> discoveredNodes,
+            IReadOnlyList<Uri> lastKnownGoodNodes)
+        {
+            var method = typeof(AlternatorLiveNodes).GetMethod(
+                "MergePartialClusterSnapshot",
+                System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
+            Assert.That(method, Is.Not.Null);
+            return method!.Invoke(null, new object[] { discoveredNodes, lastKnownGoodNodes }) as IReadOnlyList<Uri>
+                ?? throw new InvalidOperationException("MergePartialClusterSnapshot did not return a node list.");
+        }
+
         private static Uri InvokeNextAsUriWithoutRefresh(AlternatorLiveNodes liveNodes)
         {
             var method = typeof(AlternatorLiveNodes).GetMethod(
@@ -1262,6 +2616,25 @@ namespace ScyllaDB.Alternator
                 System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(e.InnerException).Throw();
                 throw;
             }
+        }
+
+        private static void InjectFaultedAddressClient(
+            AlternatorLiveNodes liveNodes,
+            IPAddress address,
+            Uri logicalUri)
+        {
+            var field = typeof(AlternatorLiveNodes).GetField(
+                "addressPollingHttpClients",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+            Assert.That(field, Is.Not.Null);
+            var clients = field!.GetValue(liveNodes) as
+                Dictionary<(IPAddress Address, string Authority), Lazy<HttpClient>>;
+            Assert.That(clients, Is.Not.Null);
+            var cacheKey = (
+                Address: address,
+                Authority: logicalUri.GetComponents(UriComponents.SchemeAndServer, UriFormat.UriEscaped));
+            clients![cacheKey] = new Lazy<HttpClient>(
+                () => throw new IOException("simulated transient client-construction failure"));
         }
 
         private static HttpResponseMessage JsonResponse(string body)
@@ -1415,6 +2788,101 @@ namespace ScyllaDB.Alternator
             }
         }
 
+        private sealed class MutableRoutingScope : RoutingScope
+        {
+            internal MutableRoutingScope(string query)
+            {
+                this.LocalNodesQuery = query;
+            }
+
+            public string Name => "Mutable";
+
+            public string Description => "Mutable test routing scope";
+
+            public RoutingScope? Fallback { get; set; }
+
+            public string LocalNodesQuery { get; }
+        }
+
+        private sealed class FeatureProbeHttpMessageHandler : HttpMessageHandler
+        {
+            private readonly string failingHost;
+
+            internal FeatureProbeHttpMessageHandler(string failingHost)
+            {
+                this.failingHost = failingHost;
+            }
+
+            internal List<Uri> RequestedUris { get; } = new List<Uri>();
+
+            protected override Task<HttpResponseMessage> SendAsync(
+                HttpRequestMessage request,
+                CancellationToken cancellationToken)
+            {
+                var uri = request.RequestUri
+                    ?? throw new InvalidOperationException("Request URI was not set.");
+                this.RequestedUris.Add(uri);
+                if (uri.Host == this.failingHost)
+                {
+                    throw new HttpRequestException("simulated feature-probe failure");
+                }
+
+                return Task.FromResult(JsonResponse(
+                    uri.Query == "?rack=fakeRack"
+                        ? "[]"
+                        : "[\"healthy.example.com\"]"));
+            }
+        }
+
+        private sealed class TimeoutThenHealthySeedHttpMessageHandler : HttpMessageHandler
+        {
+            private readonly ISet<string> timedOutHosts;
+
+            internal TimeoutThenHealthySeedHttpMessageHandler(ISet<string> timedOutHosts)
+            {
+                this.timedOutHosts = timedOutHosts;
+            }
+
+            internal List<string> RequestedHosts { get; } = new List<string>();
+
+            protected override async Task<HttpResponseMessage> SendAsync(
+                HttpRequestMessage request,
+                CancellationToken cancellationToken)
+            {
+                var host = request.RequestUri?.Host
+                    ?? throw new InvalidOperationException("Request URI was not set.");
+                this.RequestedHosts.Add(host);
+                if (this.timedOutHosts.Contains(host))
+                {
+                    await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                    throw new InvalidOperationException("Infinite timeout completed without cancellation.");
+                }
+
+                return JsonResponse("[\"healthy-node.example.com\"]");
+            }
+        }
+
+        private sealed class ScopedTimeoutHttpMessageHandler : HttpMessageHandler
+        {
+            internal List<Uri> RequestedUris { get; } = new List<Uri>();
+
+            protected override async Task<HttpResponseMessage> SendAsync(
+                HttpRequestMessage request,
+                CancellationToken cancellationToken)
+            {
+                var uri = request.RequestUri
+                    ?? throw new InvalidOperationException("Request URI was not set.");
+                this.RequestedUris.Add(uri);
+                if (!string.IsNullOrEmpty(uri.Query))
+                {
+                    await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                    throw new InvalidOperationException("Infinite timeout completed without cancellation.");
+                }
+
+                return JsonResponse("[\"fallback-node.example.com\"]");
+            }
+        }
+
         private sealed class DiscoveryHttpMessageHandler : HttpMessageHandler
         {
             private readonly IReadOnlyDictionary<string, string> responsesByHost;
@@ -1526,6 +2994,234 @@ namespace ScyllaDB.Alternator
             }
         }
 
+        private sealed class OutOfOrderDiscoveryHttpMessageHandler : HttpMessageHandler
+        {
+            private readonly ManualResetEventSlim firstRequestStarted = new ManualResetEventSlim();
+            private readonly ManualResetEventSlim secondRequestStarted = new ManualResetEventSlim();
+            private readonly ManualResetEventSlim releaseFirstRequest = new ManualResetEventSlim();
+            private readonly ManualResetEventSlim releaseSecondRequest = new ManualResetEventSlim();
+            private readonly bool firstRequestFails;
+            private int requestIndex;
+
+            internal OutOfOrderDiscoveryHttpMessageHandler(bool firstRequestFails = false)
+            {
+                this.firstRequestFails = firstRequestFails;
+            }
+
+            internal bool WaitForFirstRequest(TimeSpan timeout)
+            {
+                return this.firstRequestStarted.Wait(timeout);
+            }
+
+            internal bool WaitForSecondRequest(TimeSpan timeout)
+            {
+                return this.secondRequestStarted.Wait(timeout);
+            }
+
+            internal void ReleaseFirstRequest()
+            {
+                this.releaseFirstRequest.Set();
+            }
+
+            internal void ReleaseSecondRequest()
+            {
+                this.releaseSecondRequest.Set();
+            }
+
+            protected override Task<HttpResponseMessage> SendAsync(
+                HttpRequestMessage request,
+                CancellationToken cancellationToken)
+            {
+                var index = Interlocked.Increment(ref this.requestIndex) - 1;
+                if (index == 0)
+                {
+                    this.firstRequestStarted.Set();
+                    this.releaseFirstRequest.Wait(cancellationToken);
+                    if (this.firstRequestFails)
+                    {
+                        throw new HttpRequestException("simulated stale refresh failure");
+                    }
+
+                    return Task.FromResult(JsonResponse("[\"old.example.com\"]"));
+                }
+
+                if (index == 1)
+                {
+                    this.secondRequestStarted.Set();
+                    this.releaseSecondRequest.Wait(cancellationToken);
+                    return Task.FromResult(JsonResponse(
+                        this.firstRequestFails
+                            ? "[\"entrypoint.test\"]"
+                            : "[\"new.example.com\"]"));
+                }
+
+                throw new InvalidOperationException("Unexpected discovery request.");
+            }
+
+            protected override void Dispose(bool disposing)
+            {
+                if (disposing)
+                {
+                    this.firstRequestStarted.Dispose();
+                    this.secondRequestStarted.Dispose();
+                    this.releaseFirstRequest.Dispose();
+                    this.releaseSecondRequest.Dispose();
+                }
+
+                base.Dispose(disposing);
+            }
+        }
+
+        private sealed class CancellableBlockingHttpMessageHandler : HttpMessageHandler
+        {
+            private readonly ManualResetEventSlim requestStarted = new ManualResetEventSlim();
+            private readonly ManualResetEventSlim requestCanceled = new ManualResetEventSlim();
+
+            internal bool WaitForRequest(TimeSpan timeout)
+            {
+                return this.requestStarted.Wait(timeout);
+            }
+
+            internal bool WaitForCancellation(TimeSpan timeout)
+            {
+                return this.requestCanceled.Wait(timeout);
+            }
+
+            protected override async Task<HttpResponseMessage> SendAsync(
+                HttpRequestMessage request,
+                CancellationToken cancellationToken)
+            {
+                this.requestStarted.Set();
+                try
+                {
+                    await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                    throw new InvalidOperationException("Infinite delay completed without cancellation.");
+                }
+                finally
+                {
+                    this.requestCanceled.Set();
+                }
+            }
+
+            protected override void Dispose(bool disposing)
+            {
+                if (disposing)
+                {
+                    this.requestStarted.Dispose();
+                    this.requestCanceled.Dispose();
+                }
+
+                base.Dispose(disposing);
+            }
+        }
+
+        private sealed class BlockingBodyHttpMessageHandler : HttpMessageHandler
+        {
+            private readonly ManualResetEventSlim bodyRead = new ManualResetEventSlim();
+            private readonly ManualResetEventSlim bodyReadCanceled = new ManualResetEventSlim();
+
+            internal bool WaitForBodyRead(TimeSpan timeout)
+            {
+                return this.bodyRead.Wait(timeout);
+            }
+
+            internal bool WaitForCancellation(TimeSpan timeout)
+            {
+                return this.bodyReadCanceled.Wait(timeout);
+            }
+
+            protected override Task<HttpResponseMessage> SendAsync(
+                HttpRequestMessage request,
+                CancellationToken cancellationToken)
+            {
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StreamContent(
+                        new TimeoutObservingBodyStream(this.bodyRead, this.bodyReadCanceled)),
+                });
+            }
+
+            protected override void Dispose(bool disposing)
+            {
+                if (disposing)
+                {
+                    this.bodyRead.Dispose();
+                    this.bodyReadCanceled.Dispose();
+                }
+
+                base.Dispose(disposing);
+            }
+        }
+
+        private sealed class TimeoutObservingBodyStream : Stream
+        {
+            private readonly ManualResetEventSlim bodyRead;
+            private readonly ManualResetEventSlim bodyReadCanceled;
+
+            internal TimeoutObservingBodyStream(
+                ManualResetEventSlim bodyRead,
+                ManualResetEventSlim bodyReadCanceled)
+            {
+                this.bodyRead = bodyRead;
+                this.bodyReadCanceled = bodyReadCanceled;
+            }
+
+            public override bool CanRead => true;
+
+            public override bool CanSeek => false;
+
+            public override bool CanWrite => false;
+
+            public override long Length => throw new NotSupportedException();
+
+            public override long Position
+            {
+                get => throw new NotSupportedException();
+                set => throw new NotSupportedException();
+            }
+
+            public override void Flush()
+            {
+            }
+
+            public override int Read(byte[] buffer, int offset, int count)
+            {
+                throw new NotSupportedException();
+            }
+
+            public override async ValueTask<int> ReadAsync(
+                Memory<byte> buffer,
+                CancellationToken cancellationToken = default)
+            {
+                this.bodyRead.Set();
+                try
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(3), cancellationToken);
+                    return 0;
+                }
+                catch (OperationCanceledException)
+                {
+                    this.bodyReadCanceled.Set();
+                    throw;
+                }
+            }
+
+            public override long Seek(long offset, SeekOrigin origin)
+            {
+                throw new NotSupportedException();
+            }
+
+            public override void SetLength(long value)
+            {
+                throw new NotSupportedException();
+            }
+
+            public override void Write(byte[] buffer, int offset, int count)
+            {
+                throw new NotSupportedException();
+            }
+        }
+
         private sealed class AddressMappedLiveNodes : AlternatorLiveNodes
         {
             private readonly Queue<Func<IReadOnlyList<IPAddress>>> resolutions;
@@ -1541,8 +3237,11 @@ namespace ScyllaDB.Alternator
 
             internal int ResolutionCount { get; private set; }
 
-            protected override IReadOnlyList<IPAddress> ResolveHostAddresses(string host)
+            protected override IReadOnlyList<IPAddress> ResolveHostAddresses(
+                string host,
+                CancellationToken cancellationToken)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 this.ResolutionCount++;
                 if (this.resolutions.Count != 0)
                 {
@@ -1567,9 +3266,61 @@ namespace ScyllaDB.Alternator
             internal string? ServerName { get; }
         }
 
+        private sealed class BlackholeServer : IDisposable
+        {
+            private readonly CancellationTokenSource shutdown = new CancellationTokenSource();
+            private readonly List<TcpListener> listeners = new List<TcpListener>();
+            private readonly List<Task> serverTasks = new List<Task>();
+            private int acceptedConnections;
+
+            internal BlackholeServer(int port, params IPAddress[] addresses)
+            {
+                foreach (var address in addresses)
+                {
+                    var listener = new TcpListener(address, port);
+                    listener.Start();
+                    this.listeners.Add(listener);
+                    this.serverTasks.Add(Task.Run(() => this.RunAsync(listener)));
+                }
+            }
+
+            internal int AcceptedConnections => Volatile.Read(ref this.acceptedConnections);
+
+            public void Dispose()
+            {
+                this.shutdown.Cancel();
+                foreach (var listener in this.listeners)
+                {
+                    listener.Stop();
+                }
+
+                Task.WaitAll(this.serverTasks.ToArray(), TimeSpan.FromSeconds(5));
+                this.shutdown.Dispose();
+            }
+
+            private async Task RunAsync(TcpListener listener)
+            {
+                try
+                {
+                    using var client = await listener.AcceptTcpClientAsync(this.shutdown.Token);
+                    Interlocked.Increment(ref this.acceptedConnections);
+                    await Task.Delay(Timeout.InfiniteTimeSpan, this.shutdown.Token);
+                }
+                catch (OperationCanceledException) when (this.shutdown.IsCancellationRequested)
+                {
+                }
+                catch (SocketException) when (this.shutdown.IsCancellationRequested)
+                {
+                }
+            }
+        }
+
         private sealed class LocalNodesServer : IDisposable
         {
             internal const string Http500 = "__HTTP_500__";
+            internal const string HttpDelayedValid = "__HTTP_DELAYED_VALID__";
+            internal const string HttpInvalidUtf8 = "__HTTP_INVALID_UTF8__";
+            internal const string HttpRedirect = "__HTTP_REDIRECT__";
             internal const string HttpTruncated = "__HTTP_TRUNCATED__";
 
             private readonly TcpListener listener;
@@ -1672,6 +3423,16 @@ namespace ScyllaDB.Alternator
                     return;
                 }
 
+                if (body == HttpRedirect)
+                {
+                    var redirectResponse = Encoding.ASCII.GetBytes(
+                        "HTTP/1.1 302 Found\r\n"
+                        + "Location: /redirected\r\n"
+                        + "Content-Length: 0\r\nConnection: close\r\n\r\n");
+                    await stream.WriteAsync(redirectResponse);
+                    return;
+                }
+
                 if (body == HttpTruncated)
                 {
                     var truncatedResponse = Encoding.ASCII.GetBytes(
@@ -1680,6 +3441,27 @@ namespace ScyllaDB.Alternator
                         + "Content-Length: 100\r\nConnection: close\r\n\r\n[");
                     await stream.WriteAsync(truncatedResponse);
                     return;
+                }
+
+                if (body == HttpInvalidUtf8)
+                {
+                    var invalidBody = Encoding.ASCII.GetBytes("[\"bad?.example\"]");
+                    invalidBody[5] = 0xff;
+                    var invalidResponse = Encoding.ASCII.GetBytes(
+                        "HTTP/1.1 200 OK\r\n"
+                        + "Content-Type: application/json\r\n"
+                        + "Content-Length: "
+                        + invalidBody.Length
+                        + "\r\nConnection: close\r\n\r\n");
+                    await stream.WriteAsync(invalidResponse);
+                    await stream.WriteAsync(invalidBody);
+                    return;
+                }
+
+                if (body == HttpDelayedValid)
+                {
+                    await Task.Delay(TimeSpan.FromMilliseconds(150));
+                    body = "[\"healthy-node.example.com\"]";
                 }
 
                 var bodyBytes = Encoding.UTF8.GetBytes(body);

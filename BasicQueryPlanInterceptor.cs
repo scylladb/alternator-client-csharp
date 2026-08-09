@@ -77,6 +77,7 @@ namespace ScyllaDB.Alternator
 
         private void ApplyEndpoint(IRequestContext requestContext)
         {
+            this.liveNodes.MarkRequestActivity();
             var queryPlan = this.GetOrCreateQueryPlan(requestContext.OriginalRequest, requestContext.ContextAttributes);
             if (!queryPlan.HasNext)
             {
