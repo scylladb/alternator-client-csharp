@@ -15,12 +15,13 @@
 namespace ScyllaDB.Alternator
 {
     using System;
-    using System.Collections.Concurrent;
     using System.Collections.Generic;
     using System.Diagnostics;
     using System.IO;
     using System.Linq;
+    using System.Net;
     using System.Net.Http;
+    using System.Net.Sockets;
     using System.Text.Json;
     using System.Threading;
     using System.Threading.Tasks;
@@ -31,6 +32,7 @@ namespace ScyllaDB.Alternator
     public class AlternatorLiveNodes
     {
         private const long DefaultShutdownTimeoutMs = 5000;
+        private const int MaxCachedDnsAddresses = 64;
         private static readonly NLog.Logger Logger = NLog.LogManager.GetCurrentClassLogger();
         private readonly string alternatorScheme;
         private readonly int alternatorPort;
@@ -39,6 +41,11 @@ namespace ScyllaDB.Alternator
         private readonly AlternatorConfig config;
         private readonly HttpClient pollingHttpClient;
         private readonly bool ownsPollingHttpClient;
+        private readonly bool enableDnsAddressFallback;
+        private readonly Dictionary<IPAddress, Lazy<HttpClient>> addressPollingHttpClients =
+            new Dictionary<IPAddress, Lazy<HttpClient>>();
+
+        private readonly object addressPollingHttpClientsLock = new object();
         private readonly NodeHealthStore healthStore;
         private readonly object updateSignalLock = new object();
         private List<Uri> liveNodes;
@@ -87,16 +94,25 @@ namespace ScyllaDB.Alternator
         }
 
         public AlternatorLiveNodes(AlternatorConfig config)
-            : this(config, CreatePollingHttpClient(config), true)
+            : this(config, CreatePollingHttpClient(config), true, true)
         {
         }
 
         public AlternatorLiveNodes(AlternatorConfig config, HttpClient pollingHttpClient)
-            : this(config, pollingHttpClient, false)
+            : this(config, pollingHttpClient, false, false)
         {
         }
 
-        private AlternatorLiveNodes(AlternatorConfig config, HttpClient pollingHttpClient, bool ownsPollingHttpClient)
+        protected AlternatorLiveNodes(AlternatorConfig config, bool enableDnsAddressFallback)
+            : this(config, CreatePollingHttpClient(config), true, enableDnsAddressFallback)
+        {
+        }
+
+        private AlternatorLiveNodes(
+            AlternatorConfig config,
+            HttpClient pollingHttpClient,
+            bool ownsPollingHttpClient,
+            bool enableDnsAddressFallback)
         {
             if (config == null)
             {
@@ -116,6 +132,7 @@ namespace ScyllaDB.Alternator
             this.config = config;
             this.pollingHttpClient = pollingHttpClient;
             this.ownsPollingHttpClient = ownsPollingHttpClient;
+            this.enableDnsAddressFallback = enableDnsAddressFallback;
             this.alternatorScheme = config.Scheme;
             this.alternatorPort = config.Port;
             try
@@ -578,6 +595,22 @@ namespace ScyllaDB.Alternator
         }
 #pragma warning restore SA1300, IDE1006
 
+        protected virtual IReadOnlyList<IPAddress> ResolveHostAddresses(string host)
+        {
+            var timeoutMs = this.config.ConnectionTimeoutMs > 0
+                ? this.config.ConnectionTimeoutMs
+                : AlternatorConfig.DefaultConnectionTimeoutMs;
+            using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(timeoutMs));
+            try
+            {
+                return Dns.GetHostAddressesAsync(host, cancellation.Token).GetAwaiter().GetResult();
+            }
+            catch (OperationCanceledException e)
+            {
+                throw new IOException($"DNS lookup for {host} timed out after {timeoutMs} ms", e);
+            }
+        }
+
         private static AlternatorConfig CreateConfigWithSeedUri(Uri seedUri, AlternatorConfig config)
         {
             if (config == null)
@@ -684,6 +717,27 @@ namespace ScyllaDB.Alternator
             return RackScope.Of(dc, rackName, DatacenterScope.Of(dc, ClusterScope.Create()));
         }
 
+        private static async ValueTask<Stream> ConnectToAddress(
+            IPAddress address,
+            int port,
+            CancellationToken cancellationToken)
+        {
+            var socket = new Socket(address.AddressFamily, SocketType.Stream, ProtocolType.Tcp)
+            {
+                NoDelay = true,
+            };
+            try
+            {
+                await socket.ConnectAsync(new IPEndPoint(address, port), cancellationToken).ConfigureAwait(false);
+                return new NetworkStream(socket, ownsSocket: true);
+            }
+            catch
+            {
+                socket.Dispose();
+                throw;
+            }
+        }
+
         private void UpdateCycle(CancellationToken cancellationToken)
         {
             Logger.Debug("AlternatorLiveNodes thread started");
@@ -723,12 +777,27 @@ namespace ScyllaDB.Alternator
 
         private void ClosePollingHttpClient()
         {
-            if (!this.ownsPollingHttpClient)
+            if (Interlocked.Exchange(ref this.pollingHttpClientClosed, 1) != 0)
             {
                 return;
             }
 
-            if (Interlocked.Exchange(ref this.pollingHttpClientClosed, 1) == 0)
+            List<Lazy<HttpClient>> addressClients;
+            lock (this.addressPollingHttpClientsLock)
+            {
+                addressClients = this.addressPollingHttpClients.Values.ToList();
+                this.addressPollingHttpClients.Clear();
+            }
+
+            foreach (var client in addressClients)
+            {
+                if (client.IsValueCreated)
+                {
+                    client.Value.Dispose();
+                }
+            }
+
+            if (this.ownsPollingHttpClient)
             {
                 this.pollingHttpClient.Dispose();
             }
@@ -886,8 +955,7 @@ namespace ScyllaDB.Alternator
 
             if (lastException != null)
             {
-                this.SetLiveNodes(this.MergeWithInitialNodes(this.GetLiveNodes().ToList()));
-                Logger.Warn("All nodes unreachable in every routing scope, re-injected seed nodes into live list");
+                Logger.Warn("All nodes unreachable in every routing scope, keeping existing node list");
                 return;
             }
 
@@ -898,26 +966,74 @@ namespace ScyllaDB.Alternator
         {
             var query = scope.LocalNodesQuery;
             var requestQuery = string.IsNullOrEmpty(query) ? null : query;
+            var liveAttempt = this.DiscoverNodes(
+                scope,
+                this.GetLiveNodes(),
+                requestQuery,
+                "live node");
+            if (liveAttempt.Nodes.Count != 0)
+            {
+                return liveAttempt.Nodes;
+            }
+
+            var attemptedLiveNodes = new HashSet<Uri>(liveAttempt.Candidates);
+            var seedAttempt = this.DiscoverNodes(
+                scope,
+                this.initialNodes.Where(node => !attemptedLiveNodes.Contains(node)),
+                requestQuery,
+                "seed node");
+            if (seedAttempt.Nodes.Count != 0)
+            {
+                return seedAttempt.Nodes;
+            }
+
+            if (seedAttempt.LastException != null)
+            {
+                throw seedAttempt.LastException;
+            }
+
+            if (liveAttempt.LastException != null)
+            {
+                throw liveAttempt.LastException;
+            }
+
+            return new List<Uri>();
+        }
+
+        private DiscoveryAttempt DiscoverNodes(
+            RoutingScope scope,
+            IEnumerable<Uri> candidates,
+            string? requestQuery,
+            string candidateDescription)
+        {
             Exception? lastException = null;
             var nodes = new List<Uri>();
             var seen = new HashSet<Uri>();
-            foreach (var seedNode in this.initialNodes)
+            var distinctCandidates = new List<Uri>();
+            var seenCandidates = new HashSet<Uri>();
+            foreach (var candidate in candidates)
             {
-                var uri = BuildUri(seedNode, "/localnodes", requestQuery);
+                if (!seenCandidates.Add(candidate))
+                {
+                    continue;
+                }
+
+                distinctCandidates.Add(candidate);
+                var uri = BuildUri(candidate, "/localnodes", requestQuery);
                 try
                 {
-                    var seedNodes = this.GetNodes(uri);
-                    if (seedNodes.Count == 0)
+                    var discoveredNodes = this.GetNodes(uri);
+                    if (discoveredNodes.Count == 0)
                     {
                         continue;
                     }
 
                     if (scope is not ClusterScope)
                     {
-                        return seedNodes;
+                        return new DiscoveryAttempt(distinctCandidates, discoveredNodes, lastException);
                     }
 
-                    foreach (var node in seedNodes)
+                    foreach (var node in discoveredNodes)
                     {
                         if (seen.Add(node))
                         {
@@ -927,25 +1043,85 @@ namespace ScyllaDB.Alternator
                 }
                 catch (Exception e)
                 {
-                    Logger.Warn(e, $"Failed to contact seed node {seedNode} for {scope.Description}");
+                    Logger.Warn(
+                        e,
+                        $"Failed to contact {candidateDescription} {candidate} for {scope.Description}");
                     lastException = e;
                 }
             }
 
-            if (nodes.Count != 0)
-            {
-                return nodes;
-            }
-
-            if (lastException != null)
-            {
-                throw lastException;
-            }
-
-            return new List<Uri>();
+            return new DiscoveryAttempt(distinctCandidates, nodes, lastException);
         }
 
         private List<Uri> GetNodes(Uri uri)
+        {
+            if (!this.enableDnsAddressFallback || Uri.CheckHostName(uri.Host) != UriHostNameType.Dns)
+            {
+                return this.GetNodes(uri, this.pollingHttpClient, reportNodeHealth: true).Nodes;
+            }
+
+            IReadOnlyList<IPAddress> resolvedAddresses;
+            try
+            {
+                resolvedAddresses = this.ResolveHostAddresses(uri.Host);
+            }
+            catch (Exception e)
+            {
+                this.ReportNodeResult(uri, NodeHealthObservation.ConnectionFailure);
+                throw new IOException($"Failed to resolve DNS entrypoint {uri.Host}", e);
+            }
+
+            var addresses = resolvedAddresses.Distinct().ToList();
+            if (addresses.Count == 0)
+            {
+                this.ReportNodeResult(uri, NodeHealthObservation.ConnectionFailure);
+                throw new IOException($"DNS entrypoint {uri.Host} resolved without addresses");
+            }
+
+            Exception? lastException = null;
+            var sawEmptyResponse = false;
+            foreach (var address in addresses)
+            {
+                try
+                {
+                    using var clientLease = this.GetAddressPollingHttpClient(address);
+                    var response = this.GetNodes(uri, clientLease.Client, reportNodeHealth: false);
+                    if (response.Nodes.Count != 0)
+                    {
+                        this.ReportNodeResult(uri, NodeHealthObservation.Success);
+                        return response.Nodes;
+                    }
+
+                    if (response.WasEmptyArray)
+                    {
+                        sawEmptyResponse = true;
+                        lastException = new IOException($"DNS address {address} returned an empty /localnodes list");
+                    }
+                    else
+                    {
+                        lastException = new IOException($"DNS address {address} returned no usable /localnodes entries");
+                    }
+                }
+                catch (Exception e)
+                {
+                    Logger.Warn(e, $"Failed to discover nodes from DNS address {address} for {uri.Host}");
+                    lastException = e;
+                }
+            }
+
+            if (sawEmptyResponse && !string.IsNullOrEmpty(uri.Query))
+            {
+                this.ReportNodeResult(uri, NodeHealthObservation.Success);
+                return new List<Uri>();
+            }
+
+            this.ReportNodeResult(uri, NodeHealthObservation.ConnectionFailure);
+            throw new IOException(
+                $"No usable /localnodes response from any DNS address for {uri.Host}",
+                lastException);
+        }
+
+        private DiscoveryResponse GetNodes(Uri uri, HttpClient httpClient, bool reportNodeHealth)
         {
             using var request = new HttpRequestMessage(HttpMethod.Get, uri);
             request.Headers.Host = uri.Authority;
@@ -954,30 +1130,43 @@ namespace ScyllaDB.Alternator
             HttpResponseMessage response;
             try
             {
-                response = this.pollingHttpClient.SendAsync(request).Result;
+                response = httpClient.SendAsync(request).GetAwaiter().GetResult();
             }
             catch (Exception)
             {
-                this.ReportNodeResult(uri, NodeHealthObservation.ConnectionFailure);
+                if (reportNodeHealth)
+                {
+                    this.ReportNodeResult(uri, NodeHealthObservation.ConnectionFailure);
+                }
+
                 throw;
             }
 
             using (response)
             {
-                this.ReportNodeResult(
-                    uri,
-                    NodeHealthReportingHttpMessageHandler.ObservationFromResponse(
-                        response,
-                        Stopwatch.GetElapsedTime(started),
-                        this.config.NodeHealth));
+                if (reportNodeHealth)
+                {
+                    this.ReportNodeResult(
+                        uri,
+                        NodeHealthReportingHttpMessageHandler.ObservationFromResponse(
+                            response,
+                            Stopwatch.GetElapsedTime(started),
+                            this.config.NodeHealth));
+                }
 
                 if (!response.IsSuccessStatusCode)
                 {
-                    return new List<Uri>();
+                    throw new IOException(
+                        $"host {uri} returned HTTP {(int)response.StatusCode} ({response.StatusCode}) for /localnodes");
                 }
 
                 var responseBody = StreamToString(response.Content.ReadAsStreamAsync().Result);
-                var list = JsonSerializer.Deserialize<List<string>>(responseBody) ?? new List<string>();
+                var list = JsonSerializer.Deserialize<List<string>>(responseBody);
+                if (list == null)
+                {
+                    throw new IOException($"host {uri} returned null /localnodes data");
+                }
+
                 var newHosts = new List<Uri>();
                 foreach (var host in list)
                 {
@@ -997,8 +1186,47 @@ namespace ScyllaDB.Alternator
                     }
                 }
 
-                return newHosts;
+                return new DiscoveryResponse(newHosts, list.Count == 0);
             }
+        }
+
+        private DiscoveryHttpClientLease GetAddressPollingHttpClient(IPAddress address)
+        {
+            Lazy<HttpClient>? cachedClient;
+            lock (this.addressPollingHttpClientsLock)
+            {
+                if (!this.addressPollingHttpClients.TryGetValue(address, out cachedClient)
+                    && this.addressPollingHttpClients.Count < MaxCachedDnsAddresses)
+                {
+                    cachedClient = new Lazy<HttpClient>(
+                        () => this.CreateAddressPollingHttpClient(address),
+                        LazyThreadSafetyMode.ExecutionAndPublication);
+                    this.addressPollingHttpClients.Add(address, cachedClient);
+                }
+            }
+
+            return cachedClient != null
+                ? new DiscoveryHttpClientLease(cachedClient.Value, ownsClient: false)
+                : new DiscoveryHttpClientLease(this.CreateAddressPollingHttpClient(address), ownsClient: true);
+        }
+
+        private HttpClient CreateAddressPollingHttpClient(IPAddress address)
+        {
+            var handler = AlternatorHttpClientFactory.CreateSocketsHandler(
+                this.config,
+                socketsHandler =>
+                {
+                    socketsHandler.UseProxy = false;
+                    socketsHandler.ConnectCallback = (context, cancellationToken) =>
+                        ConnectToAddress(address, context.DnsEndPoint.Port, cancellationToken);
+                });
+            var client = new HttpClient(handler, disposeHandler: true);
+            if (this.config.HttpClientTimeoutMs > 0)
+            {
+                client.Timeout = TimeSpan.FromMilliseconds(this.config.HttpClientTimeoutMs);
+            }
+
+            return client;
         }
 
         private Uri NextAsLocalNodesUri()
@@ -1088,21 +1316,6 @@ namespace ScyllaDB.Alternator
             }
         }
 
-        private List<Uri> MergeWithInitialNodes(IEnumerable<Uri> nodes)
-        {
-            var merged = new List<Uri>();
-            var seen = new HashSet<Uri>();
-            foreach (var node in nodes.Concat(this.initialNodes))
-            {
-                if (seen.Add(node))
-                {
-                    merged.Add(node);
-                }
-            }
-
-            return merged;
-        }
-
         public class ValidationError : ScyllaDB.Alternator.ValidationError
         {
             public ValidationError(string message)
@@ -1126,6 +1339,59 @@ namespace ScyllaDB.Alternator
             public FailedToCheck(string message)
                 : base(message)
             {
+            }
+        }
+
+        private sealed class DiscoveryResponse
+        {
+            internal DiscoveryResponse(List<Uri> nodes, bool wasEmptyArray)
+            {
+                this.Nodes = nodes;
+                this.WasEmptyArray = wasEmptyArray;
+            }
+
+            internal List<Uri> Nodes { get; }
+
+            internal bool WasEmptyArray { get; }
+        }
+
+        private sealed class DiscoveryAttempt
+        {
+            internal DiscoveryAttempt(
+                List<Uri> candidates,
+                List<Uri> nodes,
+                Exception? lastException)
+            {
+                this.Candidates = candidates;
+                this.Nodes = nodes;
+                this.LastException = lastException;
+            }
+
+            internal List<Uri> Candidates { get; }
+
+            internal List<Uri> Nodes { get; }
+
+            internal Exception? LastException { get; }
+        }
+
+        private sealed class DiscoveryHttpClientLease : IDisposable
+        {
+            private readonly bool ownsClient;
+
+            internal DiscoveryHttpClientLease(HttpClient client, bool ownsClient)
+            {
+                this.Client = client;
+                this.ownsClient = ownsClient;
+            }
+
+            internal HttpClient Client { get; }
+
+            public void Dispose()
+            {
+                if (this.ownsClient)
+                {
+                    this.Client.Dispose();
+                }
             }
         }
     }
