@@ -88,7 +88,6 @@ namespace ScyllaDB.Alternator
 
         public Endpoint ResolveEndpoint(EndpointParameters parameters)
         {
-            this.liveNodes.MarkRequestActivity();
             return new Endpoint(this.liveNodes.NextAsUriWithoutRefresh().ToString());
         }
 

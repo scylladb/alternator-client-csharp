@@ -56,9 +56,8 @@ namespace ScyllaDB.Alternator
                 return this;
             }
 
-            var seedHost = AlternatorEndpointValidation.ValidateSeedUri(seedUri, nameof(seedUri));
             this.seedHosts.Clear();
-            this.seedHosts.Add(seedHost);
+            this.seedHosts.Add(seedUri.Host);
             this.scheme = seedUri.Scheme;
             this.port = seedUri.Port;
             return this;
@@ -499,9 +498,6 @@ namespace ScyllaDB.Alternator
         public AlternatorConfig Build()
         {
             this.ValidateScalarOptions();
-            var validatedSeedHosts = this.seedHosts
-                .Select(host => AlternatorEndpointValidation.ValidateHostArgument(host, nameof(this.seedHosts)))
-                .ToList();
 
             if (this.headersWhitelistWasSet)
             {
@@ -516,7 +512,7 @@ namespace ScyllaDB.Alternator
 
             var effectiveTlsConfig = this.CreateEffectiveTlsConfig();
             return new AlternatorConfig(
-                validatedSeedHosts,
+                new List<string>(this.seedHosts),
                 this.scheme,
                 this.port,
                 this.routingScope ?? ClusterScope.Create(),

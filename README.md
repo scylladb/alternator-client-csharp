@@ -119,12 +119,6 @@ that request. With only one seed, discovery usually covers only that seed node's
 datacenter, so cluster scope will not route across datacenters unless the client
 is given reachable seeds from all datacenters.
 
-A Cluster refresh queries every bounded discovery candidate. When every candidate
-returns usable nodes, the combined result replaces the previous snapshot. If one
-candidate fails or returns an empty list, freshly confirmed nodes are published
-first and the remaining bounded capacity retains last-known-good nodes, so one
-unavailable datacenter cannot erase another partition's routing coverage.
-
 ```csharp
 AmazonDynamoDBClient client = AlternatorDynamoDBClient.builder()
     .withScheme("https")
@@ -136,10 +130,8 @@ AmazonDynamoDBClient client = AlternatorDynamoDBClient.builder()
     .build();
 ```
 
-Seeds passed to `withInitialSeeds(...)` are DNS names or canonical IPv4/IPv6
-literals only. Historical IPv4 aliases such as `127.1`, integer, octal, and
-hexadecimal forms are rejected. The scheme and port are shared by all seeds and
-are configured separately.
+Seeds passed to `withInitialSeeds(...)` are DNS names or IP addresses only. The
+scheme and port are shared by all seeds and are configured separately.
 
 Legacy datacenter/rack helpers remain available:
 

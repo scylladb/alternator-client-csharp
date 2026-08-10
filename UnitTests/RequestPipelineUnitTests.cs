@@ -202,12 +202,11 @@ namespace ScyllaDB.Alternator
         {
             using var server = new CountingKeepAliveHttpServer(new[]
             {
-                new TestHttpResponse(HttpStatusCode.OK, "[\"127.0.0.1\"]", closeConnection: true),
                 new TestHttpResponse(HttpStatusCode.BadRequest, "{\"__type\":\"ValidationException\",\"message\":\"bad\"}"),
                 new TestHttpResponse(HttpStatusCode.BadRequest, "{\"__type\":\"ValidationException\",\"message\":\"bad again\"}"),
                 new TestHttpResponse(HttpStatusCode.OK, "{\"TableNames\":[]}"),
             });
-            using var wrapper = AlternatorDynamoDBClient.builder()
+            using var client = AlternatorDynamoDBClient.builder()
                 .endpointOverride(server.BaseUri.ToString())
                 .withMaxConnections(1)
                 .ConfigureAws(config =>
@@ -217,12 +216,7 @@ namespace ScyllaDB.Alternator
                 })
                 .WithoutValidation()
                 .WithDeferredStart()
-                .buildWithAlternatorAPI();
-            _ = wrapper.getAlternatorLiveNodes().nextAsURI();
-            Assert.That(
-                SpinWait.SpinUntil(() => server.CompletedRequestCount == 1, TimeSpan.FromSeconds(5)),
-                Is.True);
-            var client = wrapper.getClient();
+                .build();
 
             Assert.ThrowsAsync<AmazonDynamoDBException>(() => client.ListTablesAsync());
             Assert.ThrowsAsync<AmazonDynamoDBException>(() => client.ListTablesAsync());
@@ -231,8 +225,8 @@ namespace ScyllaDB.Alternator
             await server.WaitAsync().ConfigureAwait(false);
 
             Assert.That(result.TableNames, Is.Empty);
-            Assert.That(server.RequestCount, Is.EqualTo(4));
-            Assert.That(server.AcceptCount, Is.EqualTo(2));
+            Assert.That(server.RequestCount, Is.EqualTo(3));
+            Assert.That(server.AcceptCount, Is.EqualTo(1));
         }
 
         [Test]
@@ -850,21 +844,15 @@ namespace ScyllaDB.Alternator
 
         private sealed class TestHttpResponse
         {
-            internal TestHttpResponse(
-                HttpStatusCode statusCode,
-                string body,
-                bool closeConnection = false)
+            internal TestHttpResponse(HttpStatusCode statusCode, string body)
             {
                 this.StatusCode = statusCode;
                 this.Body = body;
-                this.CloseConnection = closeConnection;
             }
 
             internal HttpStatusCode StatusCode { get; }
 
             internal string Body { get; }
-
-            internal bool CloseConnection { get; }
         }
 
         private sealed class CountingKeepAliveHttpServer : IDisposable
@@ -874,7 +862,6 @@ namespace ScyllaDB.Alternator
             private readonly CancellationTokenSource cancellation = new CancellationTokenSource();
             private readonly Task worker;
             private int acceptCount;
-            private int completedRequestCount;
             private int requestCount;
             private bool disposed;
 
@@ -891,8 +878,6 @@ namespace ScyllaDB.Alternator
             internal Uri BaseUri { get; }
 
             internal int AcceptCount => Volatile.Read(ref this.acceptCount);
-
-            internal int CompletedRequestCount => Volatile.Read(ref this.completedRequestCount);
 
             internal int RequestCount => Volatile.Read(ref this.requestCount);
 
@@ -1022,18 +1007,11 @@ namespace ScyllaDB.Alternator
                             }
 
                             var index = Interlocked.Increment(ref this.requestCount) - 1;
-                            var response = this.responses[index];
-                            var keepAlive = !response.CloseConnection && index + 1 < this.responses.Count;
                             await WriteResponseAsync(
                                 stream,
-                                response,
-                                keepAlive,
+                                this.responses[index],
+                                index + 1 < this.responses.Count,
                                 this.cancellation.Token).ConfigureAwait(false);
-                            Interlocked.Increment(ref this.completedRequestCount);
-                            if (!keepAlive)
-                            {
-                                break;
-                            }
                         }
                     }
                 }
