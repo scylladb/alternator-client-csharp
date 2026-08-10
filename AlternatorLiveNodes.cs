@@ -181,20 +181,7 @@ namespace ScyllaDB.Alternator
             lock (this.lifecycleLock)
             {
                 this.ThrowIfShutdown();
-                if (this.started)
-                {
-                    return Task.CompletedTask;
-                }
-
-                this.Validate();
-                this.refreshCancellation?.Dispose();
-                var refreshSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                this.refreshCancellation = refreshSource;
-                this.started = true;
-
-                this.refreshTask = Task.Run(
-                    () => this.UpdateCycle(refreshSource.Token),
-                    CancellationToken.None);
+                this.StartRefreshTask(cancellationToken);
                 return Task.CompletedTask;
             }
         }
@@ -1139,19 +1126,40 @@ namespace ScyllaDB.Alternator
 
         private void MarkActivity()
         {
-            var start = false;
             lock (this.lifecycleLock)
             {
-                this.ThrowIfShutdown();
-                start = this.refreshTask == null;
-            }
+                if (this.shutdownRequested || Volatile.Read(ref this.pollingHttpClientClosed) != 0)
+                {
+                    // Shutdown is terminal for discovery transport, but callers have
+                    // historically continued to route through the last live-node snapshot.
+                    return;
+                }
 
-            if (start)
-            {
-                this.Start();
+                if (this.refreshTask == null)
+                {
+                    this.StartRefreshTask(CancellationToken.None);
+                }
             }
 
             this.TriggerUpdate();
+        }
+
+        private void StartRefreshTask(CancellationToken cancellationToken)
+        {
+            if (this.started)
+            {
+                return;
+            }
+
+            this.Validate();
+            this.refreshCancellation?.Dispose();
+            var refreshSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            this.refreshCancellation = refreshSource;
+            this.started = true;
+
+            this.refreshTask = Task.Run(
+                () => this.UpdateCycle(refreshSource.Token),
+                CancellationToken.None);
         }
 
         private void ThrowIfShutdown()

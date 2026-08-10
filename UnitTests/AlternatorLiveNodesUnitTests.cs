@@ -2181,7 +2181,7 @@ namespace ScyllaDB.Alternator
         }
 
         [Test]
-        public void ShutdownAndWaitStopsRefreshTaskAndPreservesExternalPollingClientTest()
+        public void ShutdownAndWaitPreservesCachedSelectionAndExternalPollingClientTest()
         {
             var handler = new TrackingHttpMessageHandler();
             using var pollingHttpClient = new HttpClient(handler);
@@ -2195,8 +2195,11 @@ namespace ScyllaDB.Alternator
 
             liveNodes.start().Wait(TimeSpan.FromSeconds(5));
             liveNodes.nextAsURI();
+            var discoveredNode = new Uri("http://127.0.0.2:8080");
             Assert.That(
-                SpinWait.SpinUntil(() => handler.SendCount > 0, TimeSpan.FromSeconds(5)),
+                SpinWait.SpinUntil(
+                    () => liveNodes.getLiveNodes().SequenceEqual(new[] { discoveredNode }),
+                    TimeSpan.FromSeconds(5)),
                 Is.True);
 
             Assert.That(liveNodes.shutdownAndWait(), Is.True);
@@ -2204,6 +2207,11 @@ namespace ScyllaDB.Alternator
             Assert.That(liveNodes.isRunning(), Is.False);
             Assert.That(handler.DisposeCount, Is.EqualTo(0));
             Assert.That(handler.SendCount, Is.GreaterThanOrEqualTo(1));
+            var sendCountAfterShutdown = handler.SendCount;
+
+            Assert.That(liveNodes.nextAsURI(), Is.EqualTo(discoveredNode));
+            Assert.That(liveNodes.isRunning(), Is.False);
+            Assert.That(handler.SendCount, Is.EqualTo(sendCountAfterShutdown));
         }
 
         [Test]
@@ -2285,7 +2293,7 @@ namespace ScyllaDB.Alternator
         }
 
         [Test]
-        public void ShutdownIsTerminalAndRejectsTransportReuseTest()
+        public void ShutdownIsTerminalForDiscoveryAndPreservesCachedSelectionTest()
         {
             var config = AlternatorConfig.builder()
                 .withSeedHost("127.0.0.1")
@@ -2298,7 +2306,8 @@ namespace ScyllaDB.Alternator
             Assert.That(liveNodes.ShutdownAndWait(0), Is.True);
 
             Assert.Throws<ObjectDisposedException>(() => liveNodes.Start());
-            Assert.Throws<ObjectDisposedException>(() => liveNodes.NextAsUri());
+            Assert.That(liveNodes.NextAsUri(), Is.EqualTo(new Uri("http://127.0.0.1:8000")));
+            Assert.That(liveNodes.IsRunning(), Is.False);
         }
 
         [Test]
