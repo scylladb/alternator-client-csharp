@@ -31,11 +31,20 @@ namespace ScyllaDB.Alternator
             Assert.That(AttributeValueHasher.hash(new AttributeValue { S = "hello" }), Is.EqualTo(8815023923555918238L));
             Assert.That(AttributeValueHasher.hash(new AttributeValue { S = string.Empty }), Is.EqualTo(8849112093580131862L));
             Assert.That(AttributeValueHasher.hash(new AttributeValue { S = "user_123" }), Is.EqualTo(-4025731529809423594L));
+            Assert.That(AttributeValueHasher.hash(new AttributeValue { S = "こんにちは" }), Is.EqualTo(-8746014667889746860L));
             Assert.That(AttributeValueHasher.hash(new AttributeValue { N = "42" }), Is.EqualTo(-5061732451827723051L));
+            Assert.That(AttributeValueHasher.hash(new AttributeValue { N = "-12345" }), Is.EqualTo(2496798676881075539L));
             Assert.That(AttributeValueHasher.hash(new AttributeValue { N = "3.14159" }), Is.EqualTo(2139945193071104172L));
+            Assert.That(AttributeValueHasher.hash(new AttributeValue { N = "1.23E10" }), Is.EqualTo(-8571981415737439826L));
             Assert.That(
                 AttributeValueHasher.hash(new AttributeValue { B = new MemoryStream(new byte[] { 0x01, 0x02, 0x03 }) }),
                 Is.EqualTo(5026299041734804437L));
+            Assert.That(
+                AttributeValueHasher.hash(new AttributeValue { B = new MemoryStream(Array.Empty<byte>()) }),
+                Is.EqualTo(8244620721157455449L));
+            Assert.That(
+                AttributeValueHasher.hash(new AttributeValue { B = new MemoryStream(new byte[] { 0xff, 0x00, 0x80 }) }),
+                Is.EqualTo(14533934253577680L));
 
             var unsupported = Assert.Throws<ArgumentException>(() =>
                 AttributeValueHasher.hash(new AttributeValue { BOOL = true }));
@@ -45,9 +54,23 @@ namespace ScyllaDB.Alternator
         }
 
         [Test]
+        public void AttributeValueHasherPreventsCrossTypeCollisionsTest()
+        {
+            Assert.That(AttributeValueHasher.hash(new AttributeValue { S = "12345" }), Is.EqualTo(-6122888897254035317L));
+            Assert.That(AttributeValueHasher.hash(new AttributeValue { N = "12345" }), Is.EqualTo(-3190731486301745196L));
+            Assert.That(
+                AttributeValueHasher.hash(new AttributeValue
+                {
+                    B = new MemoryStream(System.Text.Encoding.UTF8.GetBytes("12345")),
+                }),
+                Is.EqualTo(-3752463870508600385L));
+        }
+
+        [Test]
         public void MurmurHash3MatchesJavaAndGoVectorsTest()
         {
             Assert.That(MurmurHash3.Hash(Array.Empty<byte>()), Is.EqualTo(0L));
+            Assert.That(MurmurHash3.Hash(new byte[] { 0x01 }), Is.EqualTo(8849112093580131862L));
             Assert.That(MurmurHash3.hash(System.Text.Encoding.UTF8.GetBytes("test")), Is.EqualTo(unchecked((long)0xac7d28cc74bde19dUL)));
             Assert.That(MurmurHash3.hash(System.Text.Encoding.UTF8.GetBytes("hello")), Is.EqualTo(unchecked((long)0xcbd8a7b341bd9b02UL)));
             Assert.That(MurmurHash3.hash(System.Text.Encoding.UTF8.GetBytes("user_123")), Is.EqualTo(0x104832bf621f0137L));
@@ -58,6 +81,18 @@ namespace ScyllaDB.Alternator
             var hello = System.Text.Encoding.UTF8.GetBytes("HELLO");
 
             Assert.That(MurmurHash3.hash(data, 6, 5), Is.EqualTo(MurmurHash3.Hash(hello)));
+        }
+
+        [Test]
+        public void MurmurHash3UsesLittleEndianBlockReadsTest()
+        {
+            var data = new byte[]
+            {
+                0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+                0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+            };
+
+            Assert.That(MurmurHash3.Hash(data), Is.EqualTo(4920504430128807728L));
         }
 
         [Test]
