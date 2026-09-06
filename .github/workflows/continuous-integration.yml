@@ -17,6 +17,7 @@ on:
 
 env:
   IS_CICD: 1
+  SCYLLA_VERSION: release:2025.2
 
 jobs:
   lint:
@@ -48,6 +49,8 @@ jobs:
         with:
           dotnet-version: ${{ matrix.dotnet-version }}
 
+      - uses: astral-sh/setup-uv@v6
+
       - name: Restore
         run: dotnet restore ScyllaDB.Alternator.sln --verbosity minimal
 
@@ -73,29 +76,20 @@ jobs:
           name: unit-test-results-dotnet-${{ matrix.dotnet-version }}
           path: UnitTests/TestResults/**/*.trx
 
-      - name: Cache Docker image
-        id: docker-cache
+      - name: Run cluster infrastructure unit tests
+        run: make test-infrastructure
+
+      - name: Install pinned scylla-ccm
+        run: make ccm-install
+
+      - name: Cache Scylla relocatable package
         uses: actions/cache@v4
         with:
-          path: .docker-cache
-          key: scylla-docker-${{ hashFiles('IntegrationTests/docker-compose.yml') }}
-
-      - name: Save Docker image to cache
-        if: steps.docker-cache.outputs.cache-hit != 'true'
-        run: make docker-cache-save
-
-      - name: Cache certificates
-        id: cert-cache
-        uses: actions/cache@v4
-        with:
-          path: .cert-cache
-          key: scylla-certs-${{ hashFiles('Makefile') }}
-
-      - name: Save certificates to cache
-        if: steps.cert-cache.outputs.cache-hit != 'true'
-        run: make cert-cache-save
+          path: ~/.ccm/scylla-repository
+          key: scylla-ccm-relocatable-${{ runner.os }}-${{ runner.arch }}-${{ env.SCYLLA_VERSION }}
 
       - name: Run integration tests
+        timeout-minutes: 20
         run: make test-integration
 
       - name: Upload integration test results
@@ -104,3 +98,11 @@ jobs:
         with:
           name: integration-test-results-dotnet-${{ matrix.dotnet-version }}
           path: IntegrationTests/TestResults/**/*.trx
+
+      - name: Upload CCM diagnostics
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ccm-diagnostics-dotnet-${{ matrix.dotnet-version }}
+          path: IntegrationTests/TestResults/ccm-runtime.*/diagnostics/**
+          if-no-files-found: ignore

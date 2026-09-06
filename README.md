@@ -469,18 +469,55 @@ RoutingScope scope = liveNodes.getRoutingScope();
 make build
 make check
 make test-unit
+make test-infrastructure
 make test-integration
 ```
 
 In CI, set `IS_CICD=1` for quieter `dotnet` output.
 
-The Makefile includes Java-repo-equivalent cache helpers for integration tests:
+Integration tests use [scylla-ccm](https://github.com/scylladb/scylla-ccm) and native
+Scylla relocatable packages. They currently require Linux, Python 3.9 or newer,
+and [`uv`](https://docs.astral.sh/uv/). Install the repository-pinned CCM revision
+and run the tests with:
 
 ```sh
-make docker-cache-save
-make docker-cache-load
-make cert-cache-save
-make cert-cache-load
+make ccm-install
+make test-integration
 ```
 
-`make test-integration` starts the Scylla/Alternator Docker Compose cluster, waits for Alternator, runs integration tests, and stops the cluster.
+`make test-integration` lets the test harness provision and reuse matching clusters
+within that test run. HTTP and HTTPS certificates, endpoint discovery, readiness,
+table cleanup, diagnostics, and cluster removal are managed by the harness. The
+Makefile also performs emergency cleanup when the test process exits abnormally.
+
+The default cluster uses Scylla `release:2025.2`. Override the resolved version or
+CCM executable with `SCYLLA_VERSION` or `SCYLLA_CCM_PATH`. The scheduler detects
+host and cgroup-available memory, reserves one quarter (clamped between 512 MiB and
+4 GiB), and admits at most nine physical Scylla nodes. `SCYLLA_CCM_MAX_NODES` may
+lower that ceiling and `SCYLLA_CCM_AVAILABLE_MEMORY_MB` may override memory
+detection for unusual environments.
+
+Tests obtain clusters through explicit async leases. Reusable leases may share a
+matching cluster concurrently but expose no node controls; tests that stop, start,
+add, or remove nodes must request a private cluster. Each lease supplies unique
+table names and removes every table in its namespace when disposed. Private node
+expansion evicts idle reusable clusters when necessary, but fails immediately when
+the required capacity is held by active leases so that parallel tests cannot
+deadlock while holding their existing clusters.
+
+```csharp
+await using var shared = await TestClusters.AcquireReusableAsync(ClusterSpecs.Default);
+var tableName = shared.Resources.NewTableName("example");
+using var client = shared.Cluster.ClientBuilder(AlternatorTransport.Http).Build();
+
+var securedSpec = ClusterSpecs.Default.WithSecurity(new ClusterSecuritySpec(
+    AuthenticationMode.Password,
+    AuthorizationMode.Cassandra,
+    enforceAlternatorAuthorization: true));
+
+var privateSpec = ClusterSpecs.Default
+    .WithTopology(ClusterTopology.SingleDatacenter(1))
+    .WithTransports(AlternatorTransport.Http);
+await using var privateCluster = await TestClusters.ProvisionPrivateAsync(privateSpec);
+await privateCluster.Control.StopNodeAsync(privateCluster.Cluster.Nodes[0]);
+```
