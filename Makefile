@@ -2,41 +2,7 @@ SHELL := bash
 .ONESHELL:
 .SHELLFLAGS := -eo pipefail -c
 
-define dl_tgz
-	@if ! $(1) 2>/dev/null 1>&2; then \
-		[ -d "$(GOBIN)" ] || mkdir "$(GOBIN)"; \
-		if [ ! -f "$(GOBIN)/$(1)" ]; then \
-			echo "Downloading $(GOBIN)/$(1)"; \
-			curl --progress-bar -L $(2) | tar zxf - --wildcards --strip 1 -C $(GOBIN) '*/$(1)'; \
-			chmod +x "$(GOBIN)/$(1)"; \
-		fi; \
-	fi
-endef
-
-define dl_bin
-	@if ! $(1) 2>/dev/null 1>&2; then \
-		[ -d "$(GOBIN)" ] || mkdir "$(GOBIN)"; \
-		if [ ! -f "$(GOBIN)/$(1)" ]; then \
-			echo "Downloading $(GOBIN)/$(1)"; \
-			curl --progress-bar -L $(2) --output "$(GOBIN)/$(1)"; \
-			chmod +x "$(GOBIN)/$(1)"; \
-		fi; \
-	fi
-endef
-
-DOCKER_COMPOSE_VERSION := 2.34.0
-
 MAKEFILE_PATH := $(abspath $(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
-ARCH := $(shell uname -m)
-OS := $(shell uname -s | tr A-Z a-z)
-
-ifeq ($(ARCH),aarch64)
-	DOCKER_COMPOSE_DOWNLOAD_URL := "https://github.com/docker/compose/releases/download/v$(DOCKER_COMPOSE_VERSION)/docker-compose-$(OS)-aarch64"
-else ifeq ($(ARCH),x86_64)
-	DOCKER_COMPOSE_DOWNLOAD_URL := "https://github.com/docker/compose/releases/download/v$(DOCKER_COMPOSE_VERSION)/docker-compose-$(OS)-x86_64"
-else
-	$(error Unknown architecture "$(ARCH)")
-endif
 
 DOTNET_VERBOSITY := normal
 ifdef IS_CICD
@@ -50,15 +16,11 @@ endif
 
 export PATH := $(GOBIN):$(PATH)
 
-COMPOSE := docker-compose -f $(MAKEFILE_PATH)/IntegrationTests/docker-compose.yml
-ALTERNATOR_ENDPOINT ?= http://172.45.0.2:9998
-ALTERNATOR_HTTPS_ENDPOINT ?= https://172.45.0.2:9999
-ALTERNATOR_CA_CERT_PATH ?= $(CERT_DIR)/db.crt
-SCYLLA_IMAGE := scylladb/scylla:2025.2
-DOCKER_CACHE_DIR := $(MAKEFILE_PATH)/.docker-cache
-DOCKER_CACHE_FILE := $(DOCKER_CACHE_DIR)/scylla-image.tar
-CERT_CACHE_DIR := $(MAKEFILE_PATH)/.cert-cache
-CERT_DIR := $(MAKEFILE_PATH)/IntegrationTests/scylla
+SCYLLA_CCM_COMMIT := d15a2fab9d22fffad8a30c806a7c8e1632e58aae
+SCYLLA_CCM_VENV := $(GOBIN)/scylla-ccm-$(SCYLLA_CCM_COMMIT)
+PINNED_SCYLLA_CCM_PATH := $(SCYLLA_CCM_VENV)/bin/ccm
+SCYLLA_CCM_PATH ?= $(PINNED_SCYLLA_CCM_PATH)
+SCYLLA_VERSION ?= release:2025.2
 PACKAGE_OUTPUT_DIR ?= $(MAKEFILE_PATH)/nupkgs
 NUGET_SOURCE ?= https://api.nuget.org/v3/index.json
 NUGET_API_KEY ?=
@@ -83,7 +45,7 @@ build:
 	dotnet build IntegrationTests/ScyllaDB.Alternator.Test.csproj --configuration Release --verbosity $(DOTNET_VERBOSITY)
 
 .PHONY: verify
-verify: build check test-unit try-get
+verify: build check test-unit test-infrastructure try-get
 
 .PHONY: lint
 lint: check
@@ -217,7 +179,7 @@ fix-dotnet-format:
 	dotnet format --severity warn --verbosity diagnostic ScyllaDB.Alternator.csproj
 
 .PHONY: test
-test: build check test-unit test-integration
+test: build check test-unit test-infrastructure test-integration
 
 .PHONY: test-all
 test-all: test
@@ -267,87 +229,38 @@ checkout-one-commit-before:
 test-unit:
 	dotnet test UnitTests/ScyllaDB.Alternator.Test.csproj --filter "Category=Unit" --logger:"console;verbosity=$(DOTNET_VERBOSITY)" --logger trx --results-directory UnitTests/TestResults --verbosity $(DOTNET_VERBOSITY)
 
+.PHONY: test-infrastructure
+test-infrastructure:
+	dotnet test IntegrationTests/ScyllaDB.Alternator.Test.csproj --filter "Category=InfrastructureUnit" --logger:"console;verbosity=$(DOTNET_VERBOSITY)" --logger trx --results-directory IntegrationTests/TestResults --verbosity $(DOTNET_VERBOSITY)
+
 .PHONY: test-integration
-test-integration: scylla-start wait-for-alternator
-	ALTERNATOR_ENDPOINT=$(ALTERNATOR_ENDPOINT) ALTERNATOR_HTTPS_ENDPOINT=$(ALTERNATOR_HTTPS_ENDPOINT) ALTERNATOR_CA_CERT_PATH=$(ALTERNATOR_CA_CERT_PATH) dotnet test IntegrationTests/ScyllaDB.Alternator.Test.csproj --filter "Category=Integration" --logger:"console;verbosity=$(DOTNET_VERBOSITY)" --logger trx --results-directory IntegrationTests/TestResults --verbosity $(DOTNET_VERBOSITY) || ($(MAKE) scylla-stop && exit 1)
-	$(MAKE) scylla-stop
-
-.PHONY: wait-for-alternator
-wait-for-alternator:
-	@echo "Waiting for Alternator to be ready..."
-	@for i in $$(seq 1 60); do \
-		if curl -sf $(ALTERNATOR_ENDPOINT)/ >/dev/null 2>&1; then \
-			echo "Alternator is ready (waited $${i}s)"; \
-			break; \
-		fi; \
-		if [ $$i -eq 60 ]; then \
-			echo "Timed out waiting for Alternator"; \
-			exit 1; \
-		fi; \
-		sleep 1; \
+test-integration: ccm-install
+	mkdir -p "$(MAKEFILE_PATH)/IntegrationTests/TestResults"
+	for stale_dir in "$(MAKEFILE_PATH)"/IntegrationTests/TestResults/ccm-runtime.*; do
+		if [[ -d "$$stale_dir" ]] && [[ -f "$$stale_dir/OWNER_PID" ]]; then
+			owner_pid=$$(cat "$$stale_dir/OWNER_PID")
+			if ! kill -0 "$$owner_pid" 2>/dev/null; then
+				"$(MAKEFILE_PATH)/IntegrationTests/cleanup-ccm.sh" "$$stale_dir" "$(SCYLLA_CCM_PATH)"
+			fi
+		fi
 	done
+	run_dir=$$(mktemp -d "$(MAKEFILE_PATH)/IntegrationTests/TestResults/ccm-runtime.XXXXXX")
+	echo "$${BASHPID}" > "$$run_dir/OWNER_PID"
+	cleanup() { "$(MAKEFILE_PATH)/IntegrationTests/cleanup-ccm.sh" "$$run_dir" "$(SCYLLA_CCM_PATH)"; }
+	trap cleanup EXIT INT TERM
+	SCYLLA_CCM_PATH="$(SCYLLA_CCM_PATH)" SCYLLA_CCM_RUN_DIR="$$run_dir" SCYLLA_VERSION="$(SCYLLA_VERSION)" dotnet test IntegrationTests/ScyllaDB.Alternator.Test.csproj --filter "Category=Integration" --logger:"console;verbosity=$(DOTNET_VERBOSITY)" --logger trx --results-directory IntegrationTests/TestResults --verbosity $(DOTNET_VERBOSITY)
 
-.PHONY: .prepare-cert
-.prepare-cert:
-	@if [ ! -f "$(CERT_DIR)/db.key" ] || [ ! -f "$(CERT_DIR)/db.crt" ] || ! openssl x509 -in "$(CERT_DIR)/db.crt" -noout -text | grep "IP Address:172.45.0.2" >/dev/null; then \
-		echo "Prepare certificate"; \
-		cd "$(CERT_DIR)"; \
-		rm -f db.key db.crt; \
-		openssl req -subj "/C=US/ST=Denial/L=Springfield/O=Dis/CN=www.example.com" -x509 -newkey rsa:4096 -keyout db.key -out db.crt -days 3650 -nodes -addext "subjectAltName=IP:172.45.0.2,IP:172.45.0.3,IP:172.45.0.4"; \
-		chmod 644 db.key; \
+.PHONY: ccm-install
+ccm-install:
+	@if [[ -x "$(SCYLLA_CCM_PATH)" ]]; then exit 0; fi
+	@if [[ "$(SCYLLA_CCM_PATH)" != "$(PINNED_SCYLLA_CCM_PATH)" ]]; then \
+		echo "SCYLLA_CCM_PATH is not executable: $(SCYLLA_CCM_PATH)"; \
+		exit 1; \
 	fi
-
-.PHONY: scylla-start
-scylla-start: cert-cache-load $(GOBIN)/docker-compose docker-cache-load
-	@sudo sysctl -w fs.aio-max-nr=10485760
-	$(COMPOSE) up -d
-
-.PHONY: scylla-stop
-scylla-stop: $(GOBIN)/docker-compose
-	$(COMPOSE) down
-
-.PHONY: scylla-kill
-scylla-kill: $(GOBIN)/docker-compose
-	$(COMPOSE) kill
-
-.PHONY: scylla-rm
-scylla-rm: $(GOBIN)/docker-compose
-	$(COMPOSE) rm -f
-
-$(GOBIN)/docker-compose: Makefile
-	$(call dl_bin,docker-compose,$(DOCKER_COMPOSE_DOWNLOAD_URL))
-
-.PHONY: docker-pull
-docker-pull:
-	docker pull $(SCYLLA_IMAGE)
-
-.PHONY: docker-cache-save
-docker-cache-save: docker-pull
-	@mkdir -p $(DOCKER_CACHE_DIR)
-	docker save $(SCYLLA_IMAGE) -o $(DOCKER_CACHE_FILE)
-
-.PHONY: docker-cache-load
-docker-cache-load:
-	@if [ -f "$(DOCKER_CACHE_FILE)" ]; then \
-		echo "Loading Docker image from cache..."; \
-		docker load -i $(DOCKER_CACHE_FILE); \
-	else \
-		echo "Cache file not found, pulling image..."; \
-		$(MAKE) docker-pull; \
+	@if ! command -v uv >/dev/null 2>&1; then \
+		echo "uv is required to install scylla-ccm: https://docs.astral.sh/uv/"; \
+		exit 1; \
 	fi
-
-.PHONY: cert-cache-save
-cert-cache-save: .prepare-cert
-	@mkdir -p $(CERT_CACHE_DIR)
-	cp $(CERT_DIR)/db.key $(CERT_DIR)/db.crt $(CERT_CACHE_DIR)/
-
-.PHONY: cert-cache-load
-cert-cache-load:
-	@if [ -f "$(CERT_CACHE_DIR)/db.key" ] && [ -f "$(CERT_CACHE_DIR)/db.crt" ] && openssl x509 -in "$(CERT_CACHE_DIR)/db.crt" -noout -text | grep "IP Address:172.45.0.2" >/dev/null; then \
-		echo "Loading certificates from cache..."; \
-		cp $(CERT_CACHE_DIR)/db.key $(CERT_CACHE_DIR)/db.crt $(CERT_DIR)/; \
-		chmod 644 $(CERT_DIR)/db.key; \
-	else \
-		echo "Certificate cache not found or missing SANs, generating..."; \
-		$(MAKE) .prepare-cert; \
-	fi
+	mkdir -p "$(GOBIN)"
+	if [[ ! -x "$(SCYLLA_CCM_VENV)/bin/python" ]]; then uv venv "$(SCYLLA_CCM_VENV)"; fi
+	uv pip install --python "$(SCYLLA_CCM_VENV)/bin/python" "git+https://github.com/scylladb/scylla-ccm.git@$(SCYLLA_CCM_COMMIT)"

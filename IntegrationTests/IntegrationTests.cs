@@ -19,27 +19,25 @@ namespace ScyllaDB.Alternator
     using System.Text;
     using Amazon.DynamoDBv2;
     using Amazon.DynamoDBv2.Model;
-    using Amazon.Runtime;
+    using ScyllaDB.Alternator.TestInfrastructure;
 
     [TestFixture]
     [Category("Integration")]
+    [Parallelizable(ParallelScope.All)]
+    [FixtureLifeCycle(LifeCycle.InstancePerTestCase)]
     public class IntegrationTests
     {
-        private readonly string user = Environment.GetEnvironmentVariable("ALTERNATOR_USER") ?? TestContext.Parameters.Get("User", "none");
-        private readonly string password = Environment.GetEnvironmentVariable("ALTERNATOR_PASSWORD") ?? TestContext.Parameters.Get("Password", "none");
-        private readonly string endpoint = Environment.GetEnvironmentVariable("ALTERNATOR_ENDPOINT") ?? TestContext.Parameters.Get("Endpoint", "http://127.0.0.1:8080");
-        private readonly string httpsEndpoint = Environment.GetEnvironmentVariable("ALTERNATOR_HTTPS_ENDPOINT") ?? TestContext.Parameters.Get("HttpsEndpoint", "https://172.45.0.2:9999");
-        private readonly string caCertPath = Environment.GetEnvironmentVariable("ALTERNATOR_CA_CERT_PATH") ?? TestContext.Parameters.Get("CaCertPath", "IntegrationTests/scylla/db.crt");
-
-        public IntegrationTests()
-        {
-        }
-
         [Test]
-        public async Task BasicTableTest([Values("", "dc1")] string datacenter, [Values("", "rack1")] string rack)
+        public async Task BasicTableTest(
+            [Values(false, true)] bool useDatacenter,
+            [Values(false, true)] bool useRack)
         {
-            using var ddb = this.GetAlternatorClient(new Uri(this.endpoint), datacenter, rack);
-            var tableName = CreateTableName("basic");
+            await using var lease = await TestClusters.AcquireReusableAsync(ClusterSpecs.Default);
+            var firstNode = lease.Cluster.Nodes[0];
+            var datacenter = useDatacenter ? firstNode.Datacenter : string.Empty;
+            var rack = useRack ? firstNode.Rack : string.Empty;
+            using var ddb = GetAlternatorClient(lease.Cluster, datacenter, rack);
+            var tableName = lease.Resources.NewTableName("basic");
 
             try
             {
@@ -59,8 +57,9 @@ namespace ScyllaDB.Alternator
         [Test]
         public async Task BuildReturnsRegularAwsClientThatPerformsCrudTest()
         {
-            using var ddb = this.CreateBuilder(new Uri(this.endpoint)).Build();
-            var tableName = CreateTableName("crud");
+            await using var lease = await TestClusters.AcquireReusableAsync(ClusterSpecs.Default);
+            using var ddb = lease.Cluster.ClientBuilder(AlternatorTransport.Http).Build();
+            var tableName = lease.Resources.NewTableName("crud");
 
             try
             {
@@ -108,7 +107,8 @@ namespace ScyllaDB.Alternator
         [Test]
         public async Task WrapperExposesAlternatorApiAndLiveNodesTest()
         {
-            using var wrapper = this.CreateBuilder(new Uri(this.endpoint))
+            await using var lease = await TestClusters.AcquireReusableAsync(ClusterSpecs.Default);
+            using var wrapper = lease.Cluster.ClientBuilder(AlternatorTransport.Http)
                 .WithActiveRefreshIntervalMs(200)
                 .WithIdleRefreshIntervalMs(1000)
                 .BuildWithAlternatorAPI();
@@ -130,7 +130,9 @@ namespace ScyllaDB.Alternator
         [Test]
         public async Task DnsEntrypointDiscoversLiveClusterNodesTest()
         {
-            using var server = new LocalNodesReplayServer(await this.FetchIntegrationLocalNodesAsync());
+            await using var lease = await TestClusters.AcquireReusableAsync(ClusterSpecs.Default);
+            var endpoint = lease.Cluster.Connection(AlternatorTransport.Http).SeedEndpoint;
+            using var server = new LocalNodesReplayServer(await FetchIntegrationLocalNodesAsync(endpoint));
             var config = AlternatorConfig.builder()
                 .withSeedHost("localhost")
                 .withScheme("http")
@@ -155,11 +157,12 @@ namespace ScyllaDB.Alternator
         [Test]
         public async Task CompressionAndHeaderOptimizationClientCanSendCompressedRequestTest()
         {
+            await using var lease = await TestClusters.AcquireReusableAsync(ClusterSpecs.Default);
             var requiredHeaders = AlternatorConfig.builder()
                 .withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP)
                 .getRequiredHeaders();
 
-            using var ddb = this.CreateBuilder(new Uri(this.endpoint))
+            using var ddb = lease.Cluster.ClientBuilder(AlternatorTransport.Http)
                 .withCompressionAlgorithm(RequestCompressionAlgorithm.GZIP)
                 .withMinCompressionSizeBytes(1)
                 .withOptimizeHeaders(true)
@@ -187,7 +190,10 @@ namespace ScyllaDB.Alternator
         [Test]
         public async Task HttpsTrustAllClientCanListTablesTest()
         {
-            using var ddb = this.CreateBuilder(new Uri(this.httpsEndpoint))
+            await using var lease = await TestClusters.AcquireReusableAsync(ClusterSpecs.Default);
+            var endpoint = lease.Cluster.Connection(AlternatorTransport.Https).SeedEndpoint;
+            using var ddb = AlternatorDynamoDBClient.builder()
+                .endpointOverride(endpoint)
                 .withTlsConfig(TlsConfig.trustAll())
                 .Build();
 
@@ -198,21 +204,19 @@ namespace ScyllaDB.Alternator
         [Test]
         public async Task HttpsCustomCaClientCanListTablesTest()
         {
+            await using var lease = await TestClusters.AcquireReusableAsync(ClusterSpecs.Default);
+            var connection = lease.Cluster.Connection(AlternatorTransport.Https);
             var tlsConfig = TlsConfig.builder()
-                .withCaCertPath(this.caCertPath)
+                .withCaCertPath(connection.CaCertificatePath!)
                 .withTrustSystemCaCerts(false)
                 .build();
-            using var ddb = this.CreateBuilder(new Uri(this.httpsEndpoint))
+            using var ddb = AlternatorDynamoDBClient.builder()
+                .endpointOverride(connection.SeedEndpoint)
                 .withTlsConfig(tlsConfig)
                 .Build();
 
             var tables = await ddb.ListTablesAsync();
             Assert.That(tables.TableNames, Is.Not.Null);
-        }
-
-        private static string CreateTableName(string prefix)
-        {
-            return "csharp_it_" + prefix + "_" + Guid.NewGuid().ToString("N");
         }
 
         private static async Task CreateNumberRangeTableAsync(AmazonDynamoDBClient ddb, string tableName)
@@ -296,28 +300,24 @@ namespace ScyllaDB.Alternator
             Assert.That(condition(), Is.True);
         }
 
-        private async Task<string> FetchIntegrationLocalNodesAsync()
+        private static async Task<string> FetchIntegrationLocalNodesAsync(Uri endpoint)
         {
             using var httpClient = new HttpClient
             {
                 Timeout = TimeSpan.FromSeconds(5),
             };
-            return await httpClient.GetStringAsync(new Uri(new Uri(this.endpoint), "/localnodes"));
+            return await httpClient.GetStringAsync(new Uri(endpoint, "/localnodes"));
         }
 
         // Alternator-specific DynamoDB connection
-        private AmazonDynamoDBClient GetAlternatorClient(Uri uri, string datacenter, string rack)
+        private static AmazonDynamoDBClient GetAlternatorClient(
+            ITestClusterInfo cluster,
+            string datacenter,
+            string rack)
         {
-            return this.CreateBuilder(uri)
+            return cluster.ClientBuilder(AlternatorTransport.Http)
                 .WithDatacenterAndRack(datacenter, rack)
                 .Build();
-        }
-
-        private AlternatorDynamoDBClientBuilder CreateBuilder(Uri uri)
-        {
-            return AlternatorDynamoDBClient.builder()
-                .endpointOverride(uri)
-                .credentialsProvider(new BasicAWSCredentials(this.user, this.password));
         }
 
         private sealed class LocalNodesReplayServer : IDisposable
