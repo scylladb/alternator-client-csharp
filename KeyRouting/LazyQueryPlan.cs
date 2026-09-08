@@ -93,12 +93,7 @@ namespace ScyllaDB.Alternator.KeyRouting
         public static Uri? PreferredNodeForHash(AlternatorLiveNodes liveNodes, long seed)
         {
             var nodes = SortedAffinityNodes(liveNodes);
-            if (nodes.Count == 0)
-            {
-                return null;
-            }
-
-            return nodes[new GoRand(seed).Intn(nodes.Count)];
+            return PreferredNodeForHash(nodes, seed);
         }
 
 #pragma warning disable SA1300, IDE1006
@@ -201,6 +196,23 @@ namespace ScyllaDB.Alternator.KeyRouting
         }
 #pragma warning restore SA1300, IDE1006
 
+        internal static Uri? PreferredNodeForHash(IEnumerable<Uri> nodes, long seed)
+        {
+            if (nodes == null)
+            {
+                throw new ArgumentException("nodes cannot be null", nameof(nodes));
+            }
+
+            var sortedNodes = nodes.ToList();
+            SortAffinityNodes(sortedNodes);
+            if (sortedNodes.Count == 0)
+            {
+                return null;
+            }
+
+            return sortedNodes[new GoRand(seed).Intn(sortedNodes.Count)];
+        }
+
         private static List<Uri> GetPrimaryNodes(AlternatorLiveNodes liveNodes)
         {
             if (liveNodes == null)
@@ -268,14 +280,22 @@ namespace ScyllaDB.Alternator.KeyRouting
             }
             else
             {
-                this.remaining = GetPrimaryNodes(this.liveNodes!);
-                this.fallbackRemaining = GetFallbackNodes(this.liveNodes!);
+                if (this.preferredNodes != null)
+                {
+                    this.remaining = this.liveNodes!.GetActiveNodesInternal().ToList();
+                    this.fallbackRemaining = this.liveNodes.GetQuarantinedNodesInternal().ToList();
+                }
+                else
+                {
+                    this.remaining = GetPrimaryNodes(this.liveNodes!);
+                    this.fallbackRemaining = GetFallbackNodes(this.liveNodes!);
+                }
+
                 SortAffinityNodes(this.remaining);
                 SortAffinityNodes(this.fallbackRemaining);
                 if (this.preferredNodes != null)
                 {
                     this.remaining = OrderPreferredNodesFirst(this.remaining, this.preferredNodes);
-                    this.fallbackRemaining = OrderPreferredNodesFirst(this.fallbackRemaining, this.preferredNodes);
                 }
             }
 

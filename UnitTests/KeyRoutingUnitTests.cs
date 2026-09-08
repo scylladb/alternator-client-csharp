@@ -507,7 +507,7 @@ namespace ScyllaDB.Alternator
         }
 
         [Test]
-        public void QueryPlanPipelineHandlerBatchWriteVotingSelectsStrictMajorityPreferredNodeTest()
+        public void QueryPlanPipelineHandlerBatchWriteVotingOrdersAllVotedNodesTest()
         {
             var helper = CreateBatchWriteAffinityHelper();
             var sortedNodes = LazyQueryPlan.sortedAffinityNodes(helper.getAlternatorLiveNodes());
@@ -527,8 +527,8 @@ namespace ScyllaDB.Alternator
 
             var actualPlan = InvokeGetOrCreateQueryPlan(handler, request, new Dictionary<string, object>());
             var actualHosts = DrainQueryPlanUris(actualPlan, sortedNodes.Count).Select(uri => uri.Host).ToList();
-            var expectedHosts = new[] { target.Host }
-                .Concat(sortedNodes.Where(node => !node.Equals(target)).Select(node => node.Host))
+            var expectedHosts = new[] { target.Host, other.Host }
+                .Concat(sortedNodes.Where(node => !node.Equals(target) && !node.Equals(other)).Select(node => node.Host))
                 .ToList();
 
             Assert.That(actualHosts, Is.EqualTo(expectedHosts));
@@ -565,7 +565,7 @@ namespace ScyllaDB.Alternator
         }
 
         [Test]
-        public void QueryPlanPipelineHandlerBatchWriteVotingFallsBackOnTieTest()
+        public void QueryPlanPipelineHandlerBatchWriteVotingUsesNodeAddressTieBreakTest()
         {
             var helper = CreateBatchWriteAffinityHelper();
             var sortedNodes = LazyQueryPlan.sortedAffinityNodes(helper.getAlternatorLiveNodes());
@@ -580,7 +580,10 @@ namespace ScyllaDB.Alternator
                     Put(ItemWithId(leftKey, "left")),
                     Delete(KeyWithId(rightKey))));
 
-            Assert.That(InvokeTryCreateBatchWriteAffinityQueryPlan(handler, request), Is.Null);
+            var queryPlan = InvokeTryCreateBatchWriteAffinityQueryPlan(handler, request);
+
+            Assert.That(queryPlan, Is.Not.Null);
+            Assert.That(DrainQueryPlanUris(queryPlan!, sortedNodes.Count), Is.EqualTo(sortedNodes));
         }
 
         [Test]
@@ -776,6 +779,18 @@ namespace ScyllaDB.Alternator
         }
 
         [Test]
+        public void LazyQueryPlanPreferredNodesApplyOnlyToActiveNodesTest()
+        {
+            var quarantinedNodes = Uris("node2", "node1");
+            var liveNodes = new HealthSplitLiveNodes(Array.Empty<Uri>(), quarantinedNodes);
+            var plan = new LazyQueryPlan(liveNodes, new[] { quarantinedNodes[0] });
+
+            var planNodes = DrainQueryPlanUris(plan, quarantinedNodes.Count);
+
+            Assert.That(planNodes, Is.EqualTo(SortUris(quarantinedNodes)));
+        }
+
+        [Test]
         public void AffinityBatchWriteVotingUsesActiveNodesBeforeQuarantinedFallbackTest()
         {
             var activeNodes = Uris("node2");
@@ -792,10 +807,26 @@ namespace ScyllaDB.Alternator
 
             var queryPlan = InvokeTryCreateBatchWriteAffinityQueryPlan(interceptor, request);
             Assert.That(queryPlan, Is.Not.Null);
+            Assert.That(liveNodes.ActiveNodesReadCount, Is.EqualTo(1));
             var planNodes = DrainQueryPlanUris(queryPlan!, activeNodes.Count + quarantinedNodes.Count);
 
             Assert.That(planNodes.Take(activeNodes.Count), Is.EqualTo(activeNodes));
             Assert.That(planNodes.Skip(activeNodes.Count), Is.EquivalentTo(quarantinedNodes));
+        }
+
+        [Test]
+        public void AffinityBatchWriteVotingFallsBackWhenNoActiveNodesTest()
+        {
+            var quarantinedNodes = Uris("node2", "node1");
+            var liveNodes = new HealthSplitLiveNodes(Array.Empty<Uri>(), quarantinedNodes);
+            var affinity = BatchWriteAffinityConfig(PkInfo("orders", "id"));
+            var interceptor = new AffinityQueryPlanInterceptor(affinity, liveNodes);
+            var request = BatchWrite(Table("orders", Put(ItemWithId("order-1", "payload"))));
+
+            var queryPlan = InvokeTryCreateBatchWriteAffinityQueryPlan(interceptor, request);
+
+            Assert.That(queryPlan, Is.Null);
+            Assert.That(liveNodes.ActiveNodesReadCount, Is.EqualTo(1));
         }
 
         private static Helper CreateHelperForNodes(params string[] hosts)
@@ -1104,8 +1135,11 @@ namespace ScyllaDB.Alternator
                 this.quarantinedNodes = quarantinedNodes.ToList().AsReadOnly();
             }
 
+            internal int ActiveNodesReadCount { get; private set; }
+
             protected override IReadOnlyList<Uri> GetActiveNodesInternal()
             {
+                this.ActiveNodesReadCount++;
                 return this.activeNodes;
             }
 

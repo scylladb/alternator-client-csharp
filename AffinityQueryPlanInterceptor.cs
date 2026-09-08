@@ -140,9 +140,21 @@ namespace ScyllaDB.Alternator
                 return null;
             }
 
+            var targets = KeyAffinityRequestClassifier.ExtractBatchWriteRoutingTargets(request);
+            if (targets.Count == 0)
+            {
+                return null;
+            }
+
+            var activeNodes = this.LiveNodes.GetActiveNodesInternal().ToList();
+            if (activeNodes.Count == 0)
+            {
+                return null;
+            }
+
             var votes = new Dictionary<Uri, int>();
             var discoveryTriggered = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var target in KeyAffinityRequestClassifier.ExtractBatchWriteRoutingTargets(request))
+            foreach (var target in targets)
             {
                 var partitionKeyName = resolver.GetPartitionKeyName(target.TableName);
                 if (partitionKeyName == null)
@@ -164,7 +176,7 @@ namespace ScyllaDB.Alternator
                 try
                 {
                     var preferredNode = LazyQueryPlan.PreferredNodeForHash(
-                        this.LiveNodes,
+                        activeNodes,
                         AttributeValueHasher.Hash(partitionKey));
                     if (preferredNode != null)
                     {
@@ -176,30 +188,18 @@ namespace ScyllaDB.Alternator
                 }
             }
 
-            var selectedNode = this.SelectBatchWritePreferredNode(votes);
-            return selectedNode == null ? null : this.LiveNodes.CreateQueryPlan(new[] { selectedNode });
+            var preferredNodes = this.SelectBatchWritePreferredNodes(votes);
+            return preferredNodes.Count == 0 ? null : this.LiveNodes.CreateQueryPlan(preferredNodes);
         }
 
-        private Uri? SelectBatchWritePreferredNode(IReadOnlyDictionary<Uri, int> votes)
+        private IReadOnlyList<Uri> SelectBatchWritePreferredNodes(IReadOnlyDictionary<Uri, int> votes)
         {
-            Uri? preferredNode = null;
-            var preferredVotes = 0;
-            var tied = false;
-            foreach (var vote in votes)
-            {
-                if (vote.Value > preferredVotes)
-                {
-                    preferredNode = vote.Key;
-                    preferredVotes = vote.Value;
-                    tied = false;
-                }
-                else if (vote.Value == preferredVotes)
-                {
-                    tied = true;
-                }
-            }
-
-            return preferredNode == null || tied ? null : preferredNode;
+            return votes
+                .Where(vote => vote.Value > 0)
+                .OrderByDescending(vote => vote.Value)
+                .ThenBy(vote => vote.Key.ToString(), StringComparer.Ordinal)
+                .Select(vote => vote.Key)
+                .ToArray();
         }
     }
 }
