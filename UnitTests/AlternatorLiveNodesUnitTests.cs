@@ -393,6 +393,69 @@ namespace ScyllaDB.Alternator
         }
 
         [Test]
+        public void RecoveryRefreshReturnsToOriginalDnsEntrypointAndTriesLaterAddressTest()
+        {
+            var responses = new Queue<string>(new[]
+            {
+                "[\"learned-old.test\"]",
+                "[\"learned-new.test\"]",
+            });
+            using var server = new LocalNodesServer(2, _ => responses.Dequeue(), IPAddress.Loopback);
+            var addressAnswers = new Queue<IReadOnlyList<IPAddress>>(new[]
+            {
+                new[] { IPAddress.Loopback },
+                new[] { IPAddress.IPv6Loopback, IPAddress.Loopback },
+            });
+            var attempts = new List<IPAddress>();
+
+            IEnumerable<IPAddress> NextAddressAnswer()
+            {
+                foreach (var address in addressAnswers.Dequeue())
+                {
+                    yield return address;
+                }
+            }
+
+            using var pollingHttpClient = CreateAddressMappedHttpClient(NextAddressAnswer(), attempts);
+            var config = AlternatorConfig.builder()
+                .withSeedHost("entrypoint.test")
+                .withScheme("http")
+                .withPort(server.Port)
+                .withRoutingScope(ClusterScope.create())
+                .build();
+            var liveNodes = new AlternatorLiveNodes(config, pollingHttpClient);
+
+            InvokeUpdateLiveNodes(liveNodes);
+            var learnedNode = new Uri($"http://learned-old.test:{server.Port}");
+            Assert.That(liveNodes.getLiveNodes(), Is.EqualTo(new[] { learnedNode }));
+
+            liveNodes.reportNodeResult(learnedNode, NodeHealthObservation.ConnectionFailure);
+            Assert.That(liveNodes.getActiveNodes(), Is.Empty);
+            InvokeUpdateLiveNodes(liveNodes);
+            server.WaitForRequests();
+
+            Assert.That(
+                attempts,
+                Is.EqualTo(new[]
+                {
+                    IPAddress.Loopback,
+                    IPAddress.IPv6Loopback,
+                    IPAddress.Loopback,
+                }));
+            Assert.That(addressAnswers, Is.Empty);
+            Assert.That(
+                server.Requests.Select(request => request.Host),
+                Is.EqualTo(new[]
+                {
+                    $"entrypoint.test:{server.Port}",
+                    $"entrypoint.test:{server.Port}",
+                }));
+            Assert.That(
+                liveNodes.getLiveNodes(),
+                Is.EqualTo(new[] { new Uri($"http://learned-new.test:{server.Port}") }));
+        }
+
+        [Test]
         public void FailedRefreshReinjectsOriginalIpv6EntrypointTest()
         {
             using var server = new LocalNodesServer(1, _ => "[\"::2\"]", IPAddress.IPv6Loopback);
