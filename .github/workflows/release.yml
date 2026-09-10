@@ -30,6 +30,7 @@ jobs:
 
     permissions:
       contents: read
+      issues: read
 
     env:
       IS_CICD: 1
@@ -38,6 +39,27 @@ jobs:
       RELEASE_TARGET_TAG: ${{ inputs.target-tag }}
 
     steps:
+      - name: Block release with open release blockers
+        if: inputs.dry-run == false
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          blocker=$(gh issue list \
+            --repo "$GITHUB_REPOSITORY" \
+            --state open \
+            --label release-blocker \
+            --limit 1 \
+            --json title,url \
+            --jq '.[0] // empty')
+          if [[ -n "$blocker" ]]; then
+            blocker_title=$(jq -r '.title' <<< "$blocker")
+            blocker_url=$(jq -r '.url' <<< "$blocker")
+            echo "Release blocked by open release blocker:"
+            echo "${blocker_title} (${blocker_url})"
+            exit 1
+          fi
+
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
