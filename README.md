@@ -119,6 +119,10 @@ that request. With only one seed, discovery usually covers only that seed node's
 datacenter, so cluster scope will not route across datacenters unless the client
 is given reachable seeds from all datacenters.
 
+A cluster-wide refresh is published only after every configured seed returns a
+non-empty node list. If a refresh is incomplete, the last complete topology is
+retained.
+
 ```csharp
 AmazonDynamoDBClient client = AlternatorDynamoDBClient.builder()
     .withScheme("https")
@@ -450,6 +454,11 @@ AmazonDynamoDBClient client = AlternatorDynamoDBClient.builder()
     .withKeyRouteAffinity(KeyRouteAffinity.ANY_WRITE)
     .build();
 ```
+
+When key-route affinity is combined with a rack or datacenter routing scope,
+qualifying writes use the cluster-wide node set so the same partition key selects
+the same coordinator from every rack. Requests that do not qualify for affinity
+continue to use the configured local routing scope.
 
 ## AlternatorLiveNodes
 

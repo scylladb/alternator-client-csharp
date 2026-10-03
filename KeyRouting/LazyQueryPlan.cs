@@ -19,6 +19,7 @@ namespace ScyllaDB.Alternator.KeyRouting
         private readonly AlternatorLiveNodes? liveNodes;
         private readonly GoRand? random;
         private readonly List<Uri>? fixedNodes;
+        private readonly List<Uri>? fixedFallbackNodes;
         private readonly List<Uri>? preferredNodes;
         private readonly HashSet<Uri> usedNodes = new HashSet<Uri>();
         private List<Uri>? remaining;
@@ -32,14 +33,8 @@ namespace ScyllaDB.Alternator.KeyRouting
         }
 
         public LazyQueryPlan(IEnumerable<Uri> nodes, long seed)
+            : this(nodes, Array.Empty<Uri>(), seed)
         {
-            if (nodes == null)
-            {
-                throw new ArgumentException("nodes cannot be null", nameof(nodes));
-            }
-
-            this.random = new GoRand(seed);
-            this.fixedNodes = new List<Uri>(nodes);
         }
 
         public LazyQueryPlan(AlternatorLiveNodes liveNodes)
@@ -49,8 +44,15 @@ namespace ScyllaDB.Alternator.KeyRouting
 
         public LazyQueryPlan(AlternatorLiveNodes liveNodes, long seed)
         {
-            this.liveNodes = liveNodes ?? throw new ArgumentException("liveNodes cannot be null", nameof(liveNodes));
+            if (liveNodes == null)
+            {
+                throw new ArgumentException("liveNodes cannot be null", nameof(liveNodes));
+            }
+
+            var nodes = liveNodes.CaptureAffinityQueryPlanNodes();
             this.random = new GoRand(seed);
+            this.fixedNodes = new List<Uri>(nodes.PrimaryNodes);
+            this.fixedFallbackNodes = new List<Uri>(nodes.FallbackNodes);
         }
 
         public LazyQueryPlan(AlternatorLiveNodes liveNodes, IEnumerable<Uri> preferredNodes)
@@ -65,7 +67,55 @@ namespace ScyllaDB.Alternator.KeyRouting
                 throw new ArgumentException("preferredNodes cannot be null", nameof(preferredNodes));
             }
 
-            this.liveNodes = liveNodes;
+            var nodes = liveNodes.CaptureAffinityQueryPlanNodes();
+            this.fixedNodes = new List<Uri>(nodes.PrimaryNodes);
+            this.fixedFallbackNodes = new List<Uri>(nodes.FallbackNodes);
+            this.preferredNodes = new List<Uri>(preferredNodes);
+        }
+
+#pragma warning disable SA1202
+        internal LazyQueryPlan(
+            IEnumerable<Uri> primaryNodes,
+            IEnumerable<Uri> fallbackNodes,
+            long seed)
+        {
+            if (primaryNodes == null)
+            {
+                throw new ArgumentException("primaryNodes cannot be null", nameof(primaryNodes));
+            }
+
+            if (fallbackNodes == null)
+            {
+                throw new ArgumentException("fallbackNodes cannot be null", nameof(fallbackNodes));
+            }
+
+            this.random = new GoRand(seed);
+            this.fixedNodes = new List<Uri>(primaryNodes);
+            this.fixedFallbackNodes = new List<Uri>(fallbackNodes);
+        }
+
+        internal LazyQueryPlan(
+            IEnumerable<Uri> primaryNodes,
+            IEnumerable<Uri> fallbackNodes,
+            IEnumerable<Uri> preferredNodes)
+        {
+            if (primaryNodes == null)
+            {
+                throw new ArgumentException("primaryNodes cannot be null", nameof(primaryNodes));
+            }
+
+            if (fallbackNodes == null)
+            {
+                throw new ArgumentException("fallbackNodes cannot be null", nameof(fallbackNodes));
+            }
+
+            if (preferredNodes == null)
+            {
+                throw new ArgumentException("preferredNodes cannot be null", nameof(preferredNodes));
+            }
+
+            this.fixedNodes = new List<Uri>(primaryNodes);
+            this.fixedFallbackNodes = new List<Uri>(fallbackNodes);
             this.preferredNodes = new List<Uri>(preferredNodes);
         }
 
@@ -85,7 +135,12 @@ namespace ScyllaDB.Alternator.KeyRouting
 
         public static List<Uri> SortedAffinityNodes(AlternatorLiveNodes liveNodes)
         {
-            var nodes = GetPrimaryNodes(liveNodes);
+            if (liveNodes == null)
+            {
+                throw new ArgumentException("liveNodes cannot be null", nameof(liveNodes));
+            }
+
+            var nodes = liveNodes.CaptureAffinityQueryPlanNodes().PrimaryNodes.ToList();
             SortAffinityNodes(nodes);
             return nodes;
         }
@@ -195,6 +250,7 @@ namespace ScyllaDB.Alternator.KeyRouting
             return this.GetEnumerator();
         }
 #pragma warning restore SA1300, IDE1006
+#pragma warning restore SA1202
 
         internal static Uri? PreferredNodeForHash(IEnumerable<Uri> nodes, long seed)
         {
@@ -211,31 +267,6 @@ namespace ScyllaDB.Alternator.KeyRouting
             }
 
             return sortedNodes[new GoRand(seed).Intn(sortedNodes.Count)];
-        }
-
-        private static List<Uri> GetPrimaryNodes(AlternatorLiveNodes liveNodes)
-        {
-            if (liveNodes == null)
-            {
-                throw new ArgumentException("liveNodes cannot be null", nameof(liveNodes));
-            }
-
-            var activeNodes = liveNodes.GetActiveNodesInternal().ToList();
-            return activeNodes.Count != 0
-                ? activeNodes
-                : liveNodes.GetQuarantinedNodesInternal().ToList();
-        }
-
-        private static List<Uri> GetFallbackNodes(AlternatorLiveNodes liveNodes)
-        {
-            if (liveNodes == null)
-            {
-                throw new ArgumentException("liveNodes cannot be null", nameof(liveNodes));
-            }
-
-            return liveNodes.GetActiveNodesInternal().Count != 0
-                ? liveNodes.GetQuarantinedNodesInternal().ToList()
-                : new List<Uri>();
         }
 
         private static void SortAffinityNodes(List<Uri> nodes)
@@ -276,27 +307,17 @@ namespace ScyllaDB.Alternator.KeyRouting
             if (this.fixedNodes != null)
             {
                 this.remaining = new List<Uri>(this.fixedNodes);
-                SortAffinityNodes(this.remaining);
-            }
-            else
-            {
-                if (this.preferredNodes != null)
-                {
-                    this.remaining = this.liveNodes!.GetActiveNodesInternal().ToList();
-                    this.fallbackRemaining = this.liveNodes.GetQuarantinedNodesInternal().ToList();
-                }
-                else
-                {
-                    this.remaining = GetPrimaryNodes(this.liveNodes!);
-                    this.fallbackRemaining = GetFallbackNodes(this.liveNodes!);
-                }
-
+                this.fallbackRemaining = new List<Uri>(this.fixedFallbackNodes ?? Enumerable.Empty<Uri>());
                 SortAffinityNodes(this.remaining);
                 SortAffinityNodes(this.fallbackRemaining);
                 if (this.preferredNodes != null)
                 {
                     this.remaining = OrderPreferredNodesFirst(this.remaining, this.preferredNodes);
                 }
+            }
+            else
+            {
+                throw new InvalidOperationException("Seeded query plans require a captured node snapshot");
             }
 
             this.initialized = true;
