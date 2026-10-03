@@ -197,14 +197,9 @@ namespace ScyllaDB.Alternator
         }
 
         [Test]
-        public void ClusterScopeKeepsSuccessfulDiscoveryWhenAnotherSeedFailsTest()
+        public void ClusterScopeKeepsCompleteTopologyWhenLaterDiscoveryIsPartialTest()
         {
-            var handler = new DiscoveryHttpMessageHandler(
-                new Dictionary<string, string>
-                {
-                    ["dc1-node1.example.com"] = "[\"dc1-node1.example.com\"]",
-                },
-                new HashSet<string> { "dc2-node1.example.com" });
+            var handler = new PartialClusterDiscoveryHttpMessageHandler();
             using var pollingHttpClient = new HttpClient(handler);
             var config = AlternatorConfig.builder()
                 .withSeedHosts(new[] { "dc1-node1.example.com", "dc2-node1.example.com" })
@@ -215,13 +210,29 @@ namespace ScyllaDB.Alternator
             var liveNodes = new AlternatorLiveNodes(config, pollingHttpClient);
 
             InvokeUpdateLiveNodes(liveNodes);
+            var completeTopology = liveNodes.getLiveNodes();
+            InvokeUpdateLiveNodes(liveNodes);
 
             Assert.That(
-                liveNodes.getLiveNodes().Select(node => node.Host),
-                Is.EqualTo(new[] { "dc1-node1.example.com" }));
+                completeTopology.Select(node => node.Host),
+                Is.EqualTo(new[]
+                {
+                    "dc1-node1.example.com",
+                    "dc1-node2.example.com",
+                    "dc2-node1.example.com",
+                    "dc2-node2.example.com",
+                }));
+            Assert.That(liveNodes.getLiveNodes(), Is.EqualTo(completeTopology));
+            Assert.That(liveNodes.getLiveNodes().Select(node => node.Host), Does.Not.Contain("partial.example.com"));
             Assert.That(
                 handler.RequestedUris.Select(uri => uri.Host),
-                Is.EqualTo(new[] { "dc1-node1.example.com", "dc2-node1.example.com" }));
+                Is.EqualTo(new[]
+                {
+                    "dc1-node1.example.com",
+                    "dc2-node1.example.com",
+                    "dc1-node1.example.com",
+                    "dc2-node1.example.com",
+                }));
         }
 
         [Test]
@@ -334,6 +345,115 @@ namespace ScyllaDB.Alternator
                     "dc=dc1&rack=rack2",
                     string.Empty,
                 }));
+        }
+
+        [Test]
+        public void AffinityInterceptorEnablesClusterDiscoveryOnSeparatelyCreatedRackManagerTest()
+        {
+            using var server = new LocalNodesServer(
+                2,
+                request => string.IsNullOrEmpty(request.Query)
+                    ? "[\"127.0.0.2\",\"127.0.0.3\",\"127.0.0.4\"]"
+                    : "[\"127.0.0.2\"]");
+            var liveNodesConfig = AlternatorConfig.builder()
+                .withSeedHost("127.0.0.1")
+                .withScheme("http")
+                .withPort(server.Port)
+                .withRoutingScope(RackScope.of("dc1", "rack1", ClusterScope.create()))
+                .build();
+            var liveNodes = new AlternatorLiveNodes(liveNodesConfig);
+            var affinity = KeyRouteAffinityConfig.builder()
+                .withType(KeyRouteAffinity.ANY_WRITE)
+                .withPkInfo("users", "id")
+                .build();
+            liveNodes.start().Wait(TimeSpan.FromSeconds(5));
+            try
+            {
+                var interceptor = new AffinityQueryPlanInterceptor(affinity, liveNodes);
+                server.WaitForRequests();
+
+                var basicPlan = new BasicQueryPlanInterceptor(liveNodes)
+                    .GetOrCreateQueryPlan(new ListTablesRequest(), new Dictionary<string, object>())
+                    .ToList();
+                var affinityPlan = interceptor.GetOrCreateQueryPlan(
+                        new PutItemRequest
+                        {
+                            TableName = "users",
+                            Item = new Dictionary<string, AttributeValue>
+                            {
+                                ["id"] = new AttributeValue { S = "same-partition" },
+                            },
+                        },
+                        new Dictionary<string, object>())
+                    .ToList();
+
+                Assert.That(basicPlan.Select(node => node.Host), Is.EqualTo(new[] { "127.0.0.2" }));
+                Assert.That(
+                    affinityPlan.Select(node => node.Host),
+                    Is.EquivalentTo(new[] { "127.0.0.2", "127.0.0.3", "127.0.0.4" }));
+                Assert.That(
+                    server.Requests.Select(item => item.Query),
+                    Is.EqualTo(new[] { "dc=dc1&rack=rack1", string.Empty }));
+            }
+            finally
+            {
+                liveNodes.shutdownAndWait();
+            }
+        }
+
+        [Test]
+        public void AffinityOnlyDownNodeIsProbedAndRecoversTest()
+        {
+            using var server = new LocalNodesServer(
+                3,
+                request => string.IsNullOrEmpty(request.Query)
+                    ? "[\"127.0.0.1\",\"localhost\"]"
+                    : "[\"127.0.0.1\"]");
+            var affinity = KeyRouteAffinityConfig.builder()
+                .withType(KeyRouteAffinity.ANY_WRITE)
+                .withPkInfo("users", "id")
+                .build();
+            var liveNodes = CreateRackScopedLiveNodes(server.Port, "rack1", affinity);
+            var remoteNode = new Uri($"http://localhost:{server.Port}");
+
+            InvokeUpdateLiveNodes(liveNodes);
+            liveNodes.reportNodeResult(remoteNode, NodeHealthObservation.ConnectionFailure);
+
+            Assert.That(liveNodes.getActiveNodes().Select(node => node.Host), Is.EqualTo(new[] { "127.0.0.1" }));
+            Assert.That(liveNodes.getDownNodes(), Is.EqualTo(new[] { remoteNode }));
+            Assert.That(liveNodes.getNodeStatus(remoteNode)?.State, Is.EqualTo(NodeHealthState.Down));
+
+            InvokeProbeDownNodesIfDue(liveNodes);
+            server.WaitForRequests();
+
+            Assert.That(liveNodes.getNodeStatus(remoteNode)?.State, Is.EqualTo(NodeHealthState.Quarantined));
+            Assert.That(server.Requests[2].Host, Is.EqualTo($"localhost:{server.Port}"));
+            Assert.That(server.Requests[2].Query, Is.EqualTo("dc=dc1&rack=rack1"));
+        }
+
+        [Test]
+        public void TopologyAccessorsDoNotMixMembershipAndHealthRefreshGenerationsTest()
+        {
+            var affinity = KeyRouteAffinityConfig.builder()
+                .withType(KeyRouteAffinity.ANY_WRITE)
+                .withPkInfo("users", "id")
+                .build();
+            var normalLiveNodes = CreateRackScopedLiveNodes(8043, "rack1", affinity, "old-normal.example.com");
+            var affinityLiveNodes = CreateRackScopedLiveNodes(8043, "rack1", affinity, "old-affinity.example.com");
+            var newNormalNode = new Uri("http://new-normal.example.com:8043");
+            var newAffinityNode = new Uri("http://new-affinity.example.com:8043");
+
+            var normalResult = ReadNodesAcrossTopologyPublication(
+                normalLiveNodes,
+                normalLiveNodes.GetActiveNodes,
+                newNormalNode);
+            var affinityResult = ReadNodesAcrossTopologyPublication(
+                affinityLiveNodes,
+                () => LazyQueryPlan.sortedAffinityNodes(affinityLiveNodes),
+                newAffinityNode);
+
+            Assert.That(normalResult, Is.EqualTo(new[] { newNormalNode }));
+            Assert.That(affinityResult, Is.EqualTo(new[] { newAffinityNode }));
         }
 
         [Test]
@@ -837,13 +957,69 @@ namespace ScyllaDB.Alternator
             method!.Invoke(liveNodes, Array.Empty<object>());
         }
 
+        private static void InvokeProbeDownNodesIfDue(AlternatorLiveNodes liveNodes)
+        {
+            var method = typeof(AlternatorLiveNodes).GetMethod(
+                "ProbeDownNodesIfDue",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+            Assert.That(method, Is.Not.Null);
+            method!.Invoke(liveNodes, new object[] { CancellationToken.None });
+        }
+
+        private static IReadOnlyList<Uri> ReadNodesAcrossTopologyPublication(
+            AlternatorLiveNodes liveNodes,
+            Func<IReadOnlyList<Uri>> readNodes,
+            Uri newNode)
+        {
+            var bindingFlags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+            var lockField = typeof(AlternatorLiveNodes).GetField("liveNodesLock", bindingFlags);
+            var liveNodesField = typeof(AlternatorLiveNodes).GetField("liveNodes", bindingFlags);
+            var affinityNodesField = typeof(AlternatorLiveNodes).GetField("affinityNodes", bindingFlags);
+            var healthStoreField = typeof(AlternatorLiveNodes).GetField("healthStore", bindingFlags);
+            Assert.That(lockField, Is.Not.Null);
+            Assert.That(liveNodesField, Is.Not.Null);
+            Assert.That(affinityNodesField, Is.Not.Null);
+            Assert.That(healthStoreField, Is.Not.Null);
+
+            var topologyLock = lockField!.GetValue(liveNodes) as ReaderWriterLockSlim;
+            Assert.That(topologyLock, Is.Not.Null);
+            var healthStore = healthStoreField!.GetValue(liveNodes);
+            Assert.That(healthStore, Is.Not.Null);
+            var setKnownNodes = healthStore!.GetType().GetMethod(
+                "SetKnownNodes",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+            Assert.That(setKnownNodes, Is.Not.Null);
+
+            Task<IReadOnlyList<Uri>> readTask;
+            topologyLock!.EnterWriteLock();
+            try
+            {
+                readTask = Task.Run(readNodes);
+                Assert.That(
+                    SpinWait.SpinUntil(() => topologyLock.WaitingReadCount == 1, TimeSpan.FromSeconds(5)),
+                    Is.True);
+                var publishedNodes = new List<Uri> { newNode };
+                liveNodesField!.SetValue(liveNodes, publishedNodes);
+                affinityNodesField!.SetValue(liveNodes, new List<Uri>(publishedNodes));
+                setKnownNodes!.Invoke(healthStore, new object[] { publishedNodes });
+            }
+            finally
+            {
+                topologyLock.ExitWriteLock();
+            }
+
+            Assert.That(readTask.Wait(TimeSpan.FromSeconds(5)), Is.True);
+            return readTask.Result;
+        }
+
         private static AlternatorLiveNodes CreateRackScopedLiveNodes(
             int port,
             string rack,
-            KeyRouteAffinityConfig affinity)
+            KeyRouteAffinityConfig affinity,
+            string seedHost = "127.0.0.1")
         {
             var config = AlternatorConfig.builder()
-                .withSeedHost("127.0.0.1")
+                .withSeedHost(seedHost)
                 .withScheme("http")
                 .withPort(port)
                 .withRoutingScope(RackScope.of("dc1", rack, ClusterScope.create()))
@@ -956,6 +1132,36 @@ namespace ScyllaDB.Alternator
                     throw new InvalidOperationException("Unexpected discovery host: " + uri.Host);
                 }
 
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(responseBody, Encoding.UTF8, "application/json"),
+                });
+            }
+        }
+
+        private sealed class PartialClusterDiscoveryHttpMessageHandler : HttpMessageHandler
+        {
+            private int requestCount;
+
+            internal List<Uri> RequestedUris { get; } = new List<Uri>();
+
+            protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+            {
+                var uri = request.RequestUri ?? throw new InvalidOperationException("Request URI was not set.");
+                this.RequestedUris.Add(uri);
+                var currentRequest = Interlocked.Increment(ref this.requestCount);
+                if (currentRequest == 4)
+                {
+                    throw new HttpRequestException("simulated second-seed discovery failure");
+                }
+
+                var responseBody = currentRequest switch
+                {
+                    1 => "[\"dc1-node1.example.com\",\"dc1-node2.example.com\"]",
+                    2 => "[\"dc2-node1.example.com\",\"dc2-node2.example.com\"]",
+                    3 => "[\"partial.example.com\"]",
+                    _ => throw new InvalidOperationException("Unexpected discovery request number: " + currentRequest),
+                };
                 return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
                 {
                     Content = new StringContent(responseBody, Encoding.UTF8, "application/json"),

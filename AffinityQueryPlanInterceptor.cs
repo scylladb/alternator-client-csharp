@@ -53,6 +53,10 @@ namespace ScyllaDB.Alternator
         {
             this.config = config;
             this.partitionKeyResolver = partitionKeyResolver;
+            if (config?.IsEnabled == true)
+            {
+                this.LiveNodes.EnableClusterWideAffinityNodes();
+            }
         }
 
         public KeyRouteAffinityConfig? Config => this.config;

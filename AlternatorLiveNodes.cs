@@ -40,8 +40,8 @@ namespace ScyllaDB.Alternator
         private readonly HttpClient pollingHttpClient;
         private readonly bool ownsPollingHttpClient;
         private readonly NodeHealthStore healthStore;
-        private readonly bool requiresClusterWideAffinityNodes;
         private readonly object updateSignalLock = new object();
+        private volatile bool requiresClusterWideAffinityNodes;
         private List<Uri> liveNodes;
         private List<Uri> affinityNodes;
         private int nextLiveNodeIndex;
@@ -534,6 +534,37 @@ namespace ScyllaDB.Alternator
             return new LazyQueryPlan(this);
         }
 
+        internal void EnableClusterWideAffinityNodes()
+        {
+            if (this.config.RoutingScope is ClusterScope || this.requiresClusterWideAffinityNodes)
+            {
+                return;
+            }
+
+            var enabled = false;
+            this.liveNodesLock.EnterWriteLock();
+            try
+            {
+                if (!this.requiresClusterWideAffinityNodes)
+                {
+                    this.affinityNodes = new List<Uri>(this.liveNodes);
+                    this.healthStore.SetKnownNodes(this.liveNodes.Concat(this.affinityNodes));
+                    this.requiresClusterWideAffinityNodes = true;
+                    enabled = true;
+                }
+            }
+            finally
+            {
+                this.liveNodesLock.ExitWriteLock();
+            }
+
+            if (enabled && this.started)
+            {
+                Interlocked.Exchange(ref this.updateRequested, 1);
+                this.SignalUpdateWaiters();
+            }
+        }
+
         protected internal virtual IReadOnlyList<Uri> GetLiveNodesInternal()
         {
             this.liveNodesLock.EnterReadLock();
@@ -549,17 +580,41 @@ namespace ScyllaDB.Alternator
 
         protected internal virtual IReadOnlyList<Uri> GetActiveNodesInternal()
         {
-            return FilterHealthNodes(this.healthStore.GetActiveNodes(), this.GetLiveNodesSnapshot());
+            this.liveNodesLock.EnterReadLock();
+            try
+            {
+                return FilterHealthNodes(this.healthStore.GetActiveNodes(), this.liveNodes);
+            }
+            finally
+            {
+                this.liveNodesLock.ExitReadLock();
+            }
         }
 
         protected internal virtual IReadOnlyList<Uri> GetQuarantinedNodesInternal()
         {
-            return FilterHealthNodes(this.healthStore.GetQuarantinedNodes(), this.GetLiveNodesSnapshot());
+            this.liveNodesLock.EnterReadLock();
+            try
+            {
+                return FilterHealthNodes(this.healthStore.GetQuarantinedNodes(), this.liveNodes);
+            }
+            finally
+            {
+                this.liveNodesLock.ExitReadLock();
+            }
         }
 
         protected internal virtual IReadOnlyList<Uri> GetDownNodesInternal()
         {
-            return FilterHealthNodes(this.healthStore.GetDownNodes(), this.GetLiveNodesSnapshot());
+            this.liveNodesLock.EnterReadLock();
+            try
+            {
+                return this.healthStore.GetDownNodes();
+            }
+            finally
+            {
+                this.liveNodesLock.ExitReadLock();
+            }
         }
 
         protected internal virtual IReadOnlyList<Uri> GetAffinityActiveNodesInternal()
@@ -569,7 +624,15 @@ namespace ScyllaDB.Alternator
                 return this.GetActiveNodesInternal();
             }
 
-            return FilterHealthNodes(this.healthStore.GetActiveNodes(), this.GetAffinityNodesSnapshot());
+            this.liveNodesLock.EnterReadLock();
+            try
+            {
+                return FilterHealthNodes(this.healthStore.GetActiveNodes(), this.affinityNodes);
+            }
+            finally
+            {
+                this.liveNodesLock.ExitReadLock();
+            }
         }
 
         protected internal virtual IReadOnlyList<Uri> GetAffinityQuarantinedNodesInternal()
@@ -579,7 +642,15 @@ namespace ScyllaDB.Alternator
                 return this.GetQuarantinedNodesInternal();
             }
 
-            return FilterHealthNodes(this.healthStore.GetQuarantinedNodes(), this.GetAffinityNodesSnapshot());
+            this.liveNodesLock.EnterReadLock();
+            try
+            {
+                return FilterHealthNodes(this.healthStore.GetQuarantinedNodes(), this.affinityNodes);
+            }
+            finally
+            {
+                this.liveNodesLock.ExitReadLock();
+            }
         }
 
 #pragma warning disable SA1300, IDE1006
@@ -979,37 +1050,12 @@ namespace ScyllaDB.Alternator
             }
         }
 
-        private IReadOnlyList<Uri> GetLiveNodesSnapshot()
-        {
-            this.liveNodesLock.EnterReadLock();
-            try
-            {
-                return this.liveNodes.ToList().AsReadOnly();
-            }
-            finally
-            {
-                this.liveNodesLock.ExitReadLock();
-            }
-        }
-
-        private IReadOnlyList<Uri> GetAffinityNodesSnapshot()
-        {
-            this.liveNodesLock.EnterReadLock();
-            try
-            {
-                return this.affinityNodes.ToList().AsReadOnly();
-            }
-            finally
-            {
-                this.liveNodesLock.ExitReadLock();
-            }
-        }
-
         private List<Uri> GetNodesForScope(RoutingScope scope)
         {
             var query = scope.LocalNodesQuery;
             var requestQuery = string.IsNullOrEmpty(query) ? null : query;
             Exception? lastException = null;
+            var incompleteClusterDiscovery = false;
             var nodes = new List<Uri>();
             var seen = new HashSet<Uri>();
             foreach (var seedNode in this.initialNodes)
@@ -1020,6 +1066,7 @@ namespace ScyllaDB.Alternator
                     var seedNodes = this.GetNodes(uri);
                     if (seedNodes.Count == 0)
                     {
+                        incompleteClusterDiscovery |= scope is ClusterScope;
                         continue;
                     }
 
@@ -1040,7 +1087,13 @@ namespace ScyllaDB.Alternator
                 {
                     Logger.Warn(e, $"Failed to contact seed node {seedNode} for {scope.Description}");
                     lastException = e;
+                    incompleteClusterDiscovery |= scope is ClusterScope;
                 }
+            }
+
+            if (incompleteClusterDiscovery)
+            {
+                throw new IOException("Cluster-wide node discovery was incomplete", lastException);
             }
 
             if (nodes.Count != 0)
