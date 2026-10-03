@@ -199,7 +199,7 @@ namespace ScyllaDB.Alternator
         [Test]
         public void ClusterScopeKeepsCompleteTopologyWhenLaterDiscoveryIsPartialTest()
         {
-            var handler = new PartialClusterDiscoveryHttpMessageHandler();
+            var handler = new PartialClusterDiscoveryHttpMessageHandler("[\"partial.example.com\"]");
             using var pollingHttpClient = new HttpClient(handler);
             var config = AlternatorConfig.builder()
                 .withSeedHosts(new[] { "dc1-node1.example.com", "dc2-node1.example.com" })
@@ -235,6 +235,50 @@ namespace ScyllaDB.Alternator
                     "dc1-node1.example.com",
                     "dc2-node1.example.com",
                 }));
+        }
+
+        [Test]
+        public void ClusterScopeKeepsCompleteTopologyWhenOneSeedIsEmptyAndAnotherFailsTest()
+        {
+            var handler = new PartialClusterDiscoveryHttpMessageHandler("[]");
+            using var pollingHttpClient = new HttpClient(handler);
+            var config = AlternatorConfig.builder()
+                .withSeedHosts(new[] { "dc1-node1.example.com", "dc2-node1.example.com" })
+                .withScheme("http")
+                .withPort(8000)
+                .withRoutingScope(ClusterScope.create())
+                .build();
+            var liveNodes = new AlternatorLiveNodes(config, pollingHttpClient);
+
+            InvokeUpdateLiveNodes(liveNodes);
+            var completeTopology = liveNodes.getLiveNodes();
+            InvokeUpdateLiveNodes(liveNodes);
+
+            Assert.That(liveNodes.getLiveNodes(), Is.EqualTo(completeTopology));
+            Assert.That(liveNodes.getLiveNodes().Select(node => node.Host), Does.Not.Contain("dc1-node1.example.com"));
+            Assert.That(liveNodes.getLiveNodes().Select(node => node.Host), Does.Not.Contain("dc2-node1.example.com"));
+        }
+
+        [Test]
+        public void ClusterScopeKeepsCompleteTopologyWhenEverySeedFailsTest()
+        {
+            var handler = new PartialClusterDiscoveryHttpMessageHandler(null);
+            using var pollingHttpClient = new HttpClient(handler);
+            var config = AlternatorConfig.builder()
+                .withSeedHosts(new[] { "dc1-node1.example.com", "dc2-node1.example.com" })
+                .withScheme("http")
+                .withPort(8000)
+                .withRoutingScope(ClusterScope.create())
+                .build();
+            var liveNodes = new AlternatorLiveNodes(config, pollingHttpClient);
+
+            InvokeUpdateLiveNodes(liveNodes);
+            var completeTopology = liveNodes.getLiveNodes();
+            InvokeUpdateLiveNodes(liveNodes);
+
+            Assert.That(liveNodes.getLiveNodes(), Is.EqualTo(completeTopology));
+            Assert.That(liveNodes.getLiveNodes().Select(node => node.Host), Does.Not.Contain("dc1-node1.example.com"));
+            Assert.That(liveNodes.getLiveNodes().Select(node => node.Host), Does.Not.Contain("dc2-node1.example.com"));
         }
 
         [Test]
@@ -725,7 +769,7 @@ namespace ScyllaDB.Alternator
         }
 
         [Test]
-        public void FailedRefreshReinjectsOriginalIpv6EntrypointTest()
+        public void FailedRefreshKeepsLastCompleteIpv6TopologyTest()
         {
             using var server = new LocalNodesServer(1, _ => "[\"::2\"]", IPAddress.IPv6Loopback);
             var config = AlternatorConfig.builder()
@@ -745,7 +789,7 @@ namespace ScyllaDB.Alternator
 
             Assert.That(
                 liveNodes.getLiveNodes().Select(node => node.Host),
-                Is.EqualTo(new[] { "[::2]", "[::1]" }));
+                Is.EqualTo(new[] { "[::2]" }));
         }
 
         [Test]
@@ -1214,7 +1258,13 @@ namespace ScyllaDB.Alternator
 
         private sealed class PartialClusterDiscoveryHttpMessageHandler : HttpMessageHandler
         {
+            private readonly string? secondRefreshFirstSeedResponse;
             private int requestCount;
+
+            internal PartialClusterDiscoveryHttpMessageHandler(string? secondRefreshFirstSeedResponse)
+            {
+                this.secondRefreshFirstSeedResponse = secondRefreshFirstSeedResponse;
+            }
 
             internal List<Uri> RequestedUris { get; } = new List<Uri>();
 
@@ -1223,16 +1273,16 @@ namespace ScyllaDB.Alternator
                 var uri = request.RequestUri ?? throw new InvalidOperationException("Request URI was not set.");
                 this.RequestedUris.Add(uri);
                 var currentRequest = Interlocked.Increment(ref this.requestCount);
-                if (currentRequest == 4)
+                if (currentRequest == 4 || (currentRequest == 3 && this.secondRefreshFirstSeedResponse == null))
                 {
-                    throw new HttpRequestException("simulated second-seed discovery failure");
+                    throw new HttpRequestException("simulated cluster discovery failure");
                 }
 
                 var responseBody = currentRequest switch
                 {
                     1 => "[\"dc1-discovered1.example.com\",\"dc1-discovered2.example.com\"]",
                     2 => "[\"dc2-discovered1.example.com\",\"dc2-discovered2.example.com\"]",
-                    3 => "[\"partial.example.com\"]",
+                    3 => this.secondRefreshFirstSeedResponse!,
                     _ => throw new InvalidOperationException("Unexpected discovery request number: " + currentRequest),
                 };
                 return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)

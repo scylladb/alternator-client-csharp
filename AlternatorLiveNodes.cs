@@ -44,6 +44,7 @@ namespace ScyllaDB.Alternator
         private volatile bool requiresClusterWideAffinityNodes;
         private List<Uri> liveNodes;
         private List<Uri> affinityNodes;
+        private List<Uri>? lastCompleteClusterNodes;
         private int nextLiveNodeIndex;
         private int nextQuarantinedNodeIndex;
         private int nextQuarantineTrafficSequence;
@@ -972,12 +973,17 @@ namespace ScyllaDB.Alternator
             return false;
         }
 
-        private void SetLiveNodes(List<Uri> nodes)
+        private void SetLiveNodes(List<Uri> nodes, bool clusterTopologyComplete = false)
         {
             this.liveNodesLock.EnterWriteLock();
             try
             {
                 this.liveNodes = nodes;
+                if (clusterTopologyComplete)
+                {
+                    this.lastCompleteClusterNodes = new List<Uri>(nodes);
+                }
+
                 if (!this.requiresClusterWideAffinityNodes)
                 {
                     this.affinityNodes = new List<Uri>(nodes);
@@ -991,12 +997,17 @@ namespace ScyllaDB.Alternator
             }
         }
 
-        private void SetAffinityNodes(List<Uri> nodes)
+        private void SetAffinityNodes(List<Uri> nodes, bool clusterTopologyComplete = false)
         {
             this.liveNodesLock.EnterWriteLock();
             try
             {
                 this.affinityNodes = nodes;
+                if (clusterTopologyComplete)
+                {
+                    this.lastCompleteClusterNodes = new List<Uri>(nodes);
+                }
+
                 this.healthStore.SetKnownNodes(this.liveNodes.Concat(this.affinityNodes));
             }
             finally
@@ -1016,7 +1027,7 @@ namespace ScyllaDB.Alternator
                     var nodes = this.GetNodesForScope(scope);
                     if (nodes.Count != 0)
                     {
-                        this.SetLiveNodes(nodes);
+                        this.SetLiveNodes(nodes, scope is ClusterScope);
                         this.UpdateAffinityNodes(scope, nodes);
                         Logger.Info($"Updated hosts to {this.liveNodes} using {scope.Description}");
                         return;
@@ -1038,7 +1049,14 @@ namespace ScyllaDB.Alternator
 
             if (lastException is IncompleteClusterDiscoveryException)
             {
-                Logger.Warn("Cluster-wide node discovery was incomplete, keeping existing node list");
+                if (this.RestoreLastCompleteClusterTopology())
+                {
+                    Logger.Warn("Cluster-wide node discovery was incomplete, keeping last complete node list");
+                    return;
+                }
+
+                this.SetLiveNodes(this.MergeWithInitialNodes(this.GetLiveNodes().ToList()));
+                Logger.Warn("Initial cluster-wide discovery was incomplete, keeping seed nodes in live list");
                 return;
             }
 
@@ -1061,7 +1079,7 @@ namespace ScyllaDB.Alternator
 
             if (selectedScope is ClusterScope)
             {
-                this.SetAffinityNodes(new List<Uri>(selectedNodes));
+                this.SetAffinityNodes(new List<Uri>(selectedNodes), true);
                 return;
             }
 
@@ -1074,7 +1092,7 @@ namespace ScyllaDB.Alternator
                     return;
                 }
 
-                this.SetAffinityNodes(clusterNodes);
+                this.SetAffinityNodes(clusterNodes, true);
                 Logger.Info($"Updated key-route affinity hosts to {this.affinityNodes} using cluster scope");
             }
             catch (Exception e)
@@ -1124,7 +1142,7 @@ namespace ScyllaDB.Alternator
                 }
             }
 
-            if (incompleteClusterDiscovery && nodes.Count != 0)
+            if (incompleteClusterDiscovery)
             {
                 throw new IncompleteClusterDiscoveryException(lastException);
             }
@@ -1298,6 +1316,27 @@ namespace ScyllaDB.Alternator
             }
 
             return merged;
+        }
+
+        private bool RestoreLastCompleteClusterTopology()
+        {
+            this.liveNodesLock.EnterWriteLock();
+            try
+            {
+                if (this.lastCompleteClusterNodes == null)
+                {
+                    return false;
+                }
+
+                this.liveNodes = new List<Uri>(this.lastCompleteClusterNodes);
+                this.affinityNodes = new List<Uri>(this.lastCompleteClusterNodes);
+                this.healthStore.SetKnownNodes(this.lastCompleteClusterNodes);
+                return true;
+            }
+            finally
+            {
+                this.liveNodesLock.ExitWriteLock();
+            }
         }
 
         private bool EnterLiveNodesReadLock()
