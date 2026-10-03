@@ -17,6 +17,7 @@ namespace ScyllaDB.Alternator
     using System.Net;
     using System.Net.Sockets;
     using System.Text;
+    using Amazon.DynamoDBv2.Model;
     using ScyllaDB.Alternator.KeyRouting;
     using ScyllaDB.Alternator.Routing;
 
@@ -250,6 +251,89 @@ namespace ScyllaDB.Alternator
                 Is.EqualTo(new[] { "dc2-node1.example.com", "dc1-node1.example.com" }));
             Assert.That(handler.RequestedUris.Select(uri => uri.AbsolutePath), Is.All.EqualTo("/localnodes"));
             Assert.That(handler.RequestedUris.Select(uri => uri.Query), Is.All.EqualTo("?dc=dc1&rack=rack1"));
+        }
+
+        [Test]
+        public void RackScopeAffinityUsesClusterNodesWhileBasicRoutingStaysLocalTest()
+        {
+            using var server = new LocalNodesServer(
+                4,
+                request => request.Query switch
+                {
+                    "dc=dc1&rack=rack1" => "[\"127.0.0.2\"]",
+                    "dc=dc1&rack=rack2" => "[\"127.0.0.3\"]",
+                    var query when string.IsNullOrEmpty(query) => "[\"127.0.0.2\",\"127.0.0.3\",\"127.0.0.4\"]",
+                    _ => throw new InvalidOperationException("Unexpected discovery query: " + request.Query),
+                });
+            var affinity = KeyRouteAffinityConfig.builder()
+                .withType(KeyRouteAffinity.ANY_WRITE)
+                .withPkInfo("users", "id")
+                .build();
+            var rack1 = CreateRackScopedLiveNodes(server.Port, "rack1", affinity);
+            var rack2 = CreateRackScopedLiveNodes(server.Port, "rack2", affinity);
+
+            InvokeUpdateLiveNodes(rack1);
+            InvokeUpdateLiveNodes(rack2);
+            server.WaitForRequests();
+
+            var request = new PutItemRequest
+            {
+                TableName = "users",
+                Item = new Dictionary<string, AttributeValue>
+                {
+                    ["id"] = new AttributeValue { S = "same-partition" },
+                },
+            };
+            var batchRequest = new BatchWriteItemRequest
+            {
+                RequestItems = new Dictionary<string, List<WriteRequest>>
+                {
+                    ["users"] = new List<WriteRequest>
+                    {
+                        new WriteRequest
+                        {
+                            PutRequest = new PutRequest { Item = request.Item },
+                        },
+                    },
+                },
+            };
+            var rack1Affinity = new AffinityQueryPlanInterceptor(affinity, rack1);
+            var rack2Affinity = new AffinityQueryPlanInterceptor(affinity, rack2);
+
+            var rack1BasicPlan = new BasicQueryPlanInterceptor(rack1)
+                .GetOrCreateQueryPlan(new ListTablesRequest(), new Dictionary<string, object>())
+                .ToList();
+            var rack2BasicPlan = new BasicQueryPlanInterceptor(rack2)
+                .GetOrCreateQueryPlan(new ListTablesRequest(), new Dictionary<string, object>())
+                .ToList();
+            var rack1WritePlan = rack1Affinity
+                .GetOrCreateQueryPlan(request, new Dictionary<string, object>())
+                .ToList();
+            var rack2WritePlan = rack2Affinity
+                .GetOrCreateQueryPlan(request, new Dictionary<string, object>())
+                .ToList();
+            var rack1BatchPlan = rack1Affinity
+                .GetOrCreateQueryPlan(batchRequest, new Dictionary<string, object>())
+                .ToList();
+            var rack2BatchPlan = rack2Affinity
+                .GetOrCreateQueryPlan(batchRequest, new Dictionary<string, object>())
+                .ToList();
+
+            Assert.That(rack1BasicPlan.Select(node => node.Host), Is.EqualTo(new[] { "127.0.0.2" }));
+            Assert.That(rack2BasicPlan.Select(node => node.Host), Is.EqualTo(new[] { "127.0.0.3" }));
+            Assert.That(rack1WritePlan, Has.Count.EqualTo(3));
+            Assert.That(rack2WritePlan, Is.EqualTo(rack1WritePlan));
+            Assert.That(rack1BatchPlan, Has.Count.EqualTo(3));
+            Assert.That(rack2BatchPlan, Is.EqualTo(rack1BatchPlan));
+            Assert.That(
+                server.Requests.Select(item => item.Query),
+                Is.EqualTo(new[]
+                {
+                    "dc=dc1&rack=rack1",
+                    string.Empty,
+                    "dc=dc1&rack=rack2",
+                    string.Empty,
+                }));
         }
 
         [Test]
@@ -751,6 +835,21 @@ namespace ScyllaDB.Alternator
                 System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
             Assert.That(method, Is.Not.Null);
             method!.Invoke(liveNodes, Array.Empty<object>());
+        }
+
+        private static AlternatorLiveNodes CreateRackScopedLiveNodes(
+            int port,
+            string rack,
+            KeyRouteAffinityConfig affinity)
+        {
+            var config = AlternatorConfig.builder()
+                .withSeedHost("127.0.0.1")
+                .withScheme("http")
+                .withPort(port)
+                .withRoutingScope(RackScope.of("dc1", rack, ClusterScope.create()))
+                .withKeyRouteAffinity(affinity)
+                .build();
+            return new AlternatorLiveNodes(config);
         }
 
         private static HttpClient CreateAddressMappedHttpClient(

@@ -146,7 +146,7 @@ namespace ScyllaDB.Alternator
                 return null;
             }
 
-            var activeNodes = this.LiveNodes.GetActiveNodesInternal().ToList();
+            var activeNodes = this.LiveNodes.GetAffinityActiveNodesInternal().ToList();
             if (activeNodes.Count == 0)
             {
                 return null;

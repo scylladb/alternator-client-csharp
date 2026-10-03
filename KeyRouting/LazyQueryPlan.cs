@@ -220,10 +220,10 @@ namespace ScyllaDB.Alternator.KeyRouting
                 throw new ArgumentException("liveNodes cannot be null", nameof(liveNodes));
             }
 
-            var activeNodes = liveNodes.GetActiveNodesInternal().ToList();
+            var activeNodes = liveNodes.GetAffinityActiveNodesInternal().ToList();
             return activeNodes.Count != 0
                 ? activeNodes
-                : liveNodes.GetQuarantinedNodesInternal().ToList();
+                : liveNodes.GetAffinityQuarantinedNodesInternal().ToList();
         }
 
         private static List<Uri> GetFallbackNodes(AlternatorLiveNodes liveNodes)
@@ -233,8 +233,8 @@ namespace ScyllaDB.Alternator.KeyRouting
                 throw new ArgumentException("liveNodes cannot be null", nameof(liveNodes));
             }
 
-            return liveNodes.GetActiveNodesInternal().Count != 0
-                ? liveNodes.GetQuarantinedNodesInternal().ToList()
+            return liveNodes.GetAffinityActiveNodesInternal().Count != 0
+                ? liveNodes.GetAffinityQuarantinedNodesInternal().ToList()
                 : new List<Uri>();
         }
 
@@ -282,8 +282,8 @@ namespace ScyllaDB.Alternator.KeyRouting
             {
                 if (this.preferredNodes != null)
                 {
-                    this.remaining = this.liveNodes!.GetActiveNodesInternal().ToList();
-                    this.fallbackRemaining = this.liveNodes.GetQuarantinedNodesInternal().ToList();
+                    this.remaining = this.liveNodes!.GetAffinityActiveNodesInternal().ToList();
+                    this.fallbackRemaining = this.liveNodes.GetAffinityQuarantinedNodesInternal().ToList();
                 }
                 else
                 {

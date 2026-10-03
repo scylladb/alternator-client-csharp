@@ -40,8 +40,10 @@ namespace ScyllaDB.Alternator
         private readonly HttpClient pollingHttpClient;
         private readonly bool ownsPollingHttpClient;
         private readonly NodeHealthStore healthStore;
+        private readonly bool requiresClusterWideAffinityNodes;
         private readonly object updateSignalLock = new object();
         private List<Uri> liveNodes;
+        private List<Uri> affinityNodes;
         private int nextLiveNodeIndex;
         private int nextQuarantinedNodeIndex;
         private int nextQuarantineTrafficSequence;
@@ -132,6 +134,10 @@ namespace ScyllaDB.Alternator
             {
                 this.liveNodes.Add(node);
             }
+
+            this.affinityNodes = new List<Uri>(this.liveNodes);
+            this.requiresClusterWideAffinityNodes = config.KeyRouteAffinityConfig?.IsEnabled == true
+                && config.RoutingScope is not ClusterScope;
 
             this.healthStore = new NodeHealthStore(this.config.NodeHealth, this.initialNodes);
 
@@ -498,10 +504,10 @@ namespace ScyllaDB.Alternator
 
         internal Uri GetNodeForHash(long hash)
         {
-            var nodes = this.GetActiveNodesInternal();
+            var nodes = this.GetAffinityActiveNodesInternal();
             if (nodes.Count == 0)
             {
-                nodes = this.GetQuarantinedNodesInternal();
+                nodes = this.GetAffinityQuarantinedNodesInternal();
             }
 
             if (nodes.Count == 0)
@@ -543,17 +549,37 @@ namespace ScyllaDB.Alternator
 
         protected internal virtual IReadOnlyList<Uri> GetActiveNodesInternal()
         {
-            return this.healthStore.GetActiveNodes();
+            return FilterHealthNodes(this.healthStore.GetActiveNodes(), this.GetLiveNodesSnapshot());
         }
 
         protected internal virtual IReadOnlyList<Uri> GetQuarantinedNodesInternal()
         {
-            return this.healthStore.GetQuarantinedNodes();
+            return FilterHealthNodes(this.healthStore.GetQuarantinedNodes(), this.GetLiveNodesSnapshot());
         }
 
         protected internal virtual IReadOnlyList<Uri> GetDownNodesInternal()
         {
-            return this.healthStore.GetDownNodes();
+            return FilterHealthNodes(this.healthStore.GetDownNodes(), this.GetLiveNodesSnapshot());
+        }
+
+        protected internal virtual IReadOnlyList<Uri> GetAffinityActiveNodesInternal()
+        {
+            if (!this.requiresClusterWideAffinityNodes)
+            {
+                return this.GetActiveNodesInternal();
+            }
+
+            return FilterHealthNodes(this.healthStore.GetActiveNodes(), this.GetAffinityNodesSnapshot());
+        }
+
+        protected internal virtual IReadOnlyList<Uri> GetAffinityQuarantinedNodesInternal()
+        {
+            if (!this.requiresClusterWideAffinityNodes)
+            {
+                return this.GetQuarantinedNodesInternal();
+            }
+
+            return FilterHealthNodes(this.healthStore.GetQuarantinedNodes(), this.GetAffinityNodesSnapshot());
         }
 
 #pragma warning disable SA1300, IDE1006
@@ -645,6 +671,14 @@ namespace ScyllaDB.Alternator
         private static int Mod(long value, int divisor)
         {
             return (int)(((value % divisor) + divisor) % divisor);
+        }
+
+        private static IReadOnlyList<Uri> FilterHealthNodes(
+            IReadOnlyList<Uri> healthNodes,
+            IReadOnlyCollection<Uri> allowedNodes)
+        {
+            var allowed = new HashSet<Uri>(allowedNodes);
+            return healthNodes.Where(allowed.Contains).ToList().AsReadOnly();
         }
 
         private static AlternatorConfig CreateLegacyConfig(
@@ -846,7 +880,26 @@ namespace ScyllaDB.Alternator
             try
             {
                 this.liveNodes = nodes;
-                this.healthStore.SetKnownNodes(nodes);
+                if (!this.requiresClusterWideAffinityNodes)
+                {
+                    this.affinityNodes = new List<Uri>(nodes);
+                }
+
+                this.healthStore.SetKnownNodes(this.liveNodes.Concat(this.affinityNodes));
+            }
+            finally
+            {
+                this.liveNodesLock.ExitWriteLock();
+            }
+        }
+
+        private void SetAffinityNodes(List<Uri> nodes)
+        {
+            this.liveNodesLock.EnterWriteLock();
+            try
+            {
+                this.affinityNodes = nodes;
+                this.healthStore.SetKnownNodes(this.liveNodes.Concat(this.affinityNodes));
             }
             finally
             {
@@ -866,6 +919,7 @@ namespace ScyllaDB.Alternator
                     if (nodes.Count != 0)
                     {
                         this.SetLiveNodes(nodes);
+                        this.UpdateAffinityNodes(scope, nodes);
                         Logger.Info($"Updated hosts to {this.liveNodes} using {scope.Description}");
                         return;
                     }
@@ -892,6 +946,63 @@ namespace ScyllaDB.Alternator
             }
 
             Logger.Warn("No nodes found in any routing scope, keeping existing node list");
+        }
+
+        private void UpdateAffinityNodes(RoutingScope selectedScope, List<Uri> selectedNodes)
+        {
+            if (!this.requiresClusterWideAffinityNodes)
+            {
+                return;
+            }
+
+            if (selectedScope is ClusterScope)
+            {
+                this.SetAffinityNodes(new List<Uri>(selectedNodes));
+                return;
+            }
+
+            try
+            {
+                var clusterNodes = this.GetNodesForScope(ClusterScope.Create());
+                if (clusterNodes.Count == 0)
+                {
+                    Logger.Warn("No cluster-wide nodes found for key-route affinity; keeping existing affinity nodes");
+                    return;
+                }
+
+                this.SetAffinityNodes(clusterNodes);
+                Logger.Info($"Updated key-route affinity hosts to {this.affinityNodes} using cluster scope");
+            }
+            catch (Exception e)
+            {
+                Logger.Warn(e, "Failed to discover cluster-wide nodes for key-route affinity; keeping existing affinity nodes");
+            }
+        }
+
+        private IReadOnlyList<Uri> GetLiveNodesSnapshot()
+        {
+            this.liveNodesLock.EnterReadLock();
+            try
+            {
+                return this.liveNodes.ToList().AsReadOnly();
+            }
+            finally
+            {
+                this.liveNodesLock.ExitReadLock();
+            }
+        }
+
+        private IReadOnlyList<Uri> GetAffinityNodesSnapshot()
+        {
+            this.liveNodesLock.EnterReadLock();
+            try
+            {
+                return this.affinityNodes.ToList().AsReadOnly();
+            }
+            finally
+            {
+                this.liveNodesLock.ExitReadLock();
+            }
         }
 
         private List<Uri> GetNodesForScope(RoutingScope scope)

@@ -451,6 +451,11 @@ AmazonDynamoDBClient client = AlternatorDynamoDBClient.builder()
     .build();
 ```
 
+When key-route affinity is combined with a rack or datacenter routing scope,
+qualifying writes use the cluster-wide node set so the same partition key selects
+the same coordinator from every rack. Requests that do not qualify for affinity
+continue to use the configured local routing scope.
+
 ## AlternatorLiveNodes
 
 `AlternatorLiveNodes` is exposed through `buildWithAlternatorAPI()` for advanced inspection and compatibility with Java-style examples.
