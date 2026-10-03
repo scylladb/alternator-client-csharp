@@ -150,8 +150,8 @@ namespace ScyllaDB.Alternator
                 return null;
             }
 
-            var activeNodes = this.LiveNodes.GetAffinityActiveNodesInternal().ToList();
-            if (activeNodes.Count == 0)
+            var queryPlanNodes = this.LiveNodes.CaptureAffinityQueryPlanNodes();
+            if (queryPlanNodes.PrimaryNodes.Count == 0)
             {
                 return null;
             }
@@ -180,7 +180,7 @@ namespace ScyllaDB.Alternator
                 try
                 {
                     var preferredNode = LazyQueryPlan.PreferredNodeForHash(
-                        activeNodes,
+                        queryPlanNodes.PrimaryNodes,
                         AttributeValueHasher.Hash(partitionKey));
                     if (preferredNode != null)
                     {
@@ -193,7 +193,9 @@ namespace ScyllaDB.Alternator
             }
 
             var preferredNodes = this.SelectBatchWritePreferredNodes(votes);
-            return preferredNodes.Count == 0 ? null : this.LiveNodes.CreateQueryPlan(preferredNodes);
+            return preferredNodes.Count == 0
+                ? null
+                : new LazyQueryPlan(queryPlanNodes.PrimaryNodes, queryPlanNodes.FallbackNodes, preferredNodes);
         }
 
         private IReadOnlyList<Uri> SelectBatchWritePreferredNodes(IReadOnlyDictionary<Uri, int> votes)

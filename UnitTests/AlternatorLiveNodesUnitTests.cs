@@ -217,13 +217,15 @@ namespace ScyllaDB.Alternator
                 completeTopology.Select(node => node.Host),
                 Is.EqualTo(new[]
                 {
-                    "dc1-node1.example.com",
-                    "dc1-node2.example.com",
-                    "dc2-node1.example.com",
-                    "dc2-node2.example.com",
+                    "dc1-discovered1.example.com",
+                    "dc1-discovered2.example.com",
+                    "dc2-discovered1.example.com",
+                    "dc2-discovered2.example.com",
                 }));
             Assert.That(liveNodes.getLiveNodes(), Is.EqualTo(completeTopology));
             Assert.That(liveNodes.getLiveNodes().Select(node => node.Host), Does.Not.Contain("partial.example.com"));
+            Assert.That(liveNodes.getLiveNodes().Select(node => node.Host), Does.Not.Contain("dc1-node1.example.com"));
+            Assert.That(liveNodes.getLiveNodes().Select(node => node.Host), Does.Not.Contain("dc2-node1.example.com"));
             Assert.That(
                 handler.RequestedUris.Select(uri => uri.Host),
                 Is.EqualTo(new[]
@@ -398,6 +400,69 @@ namespace ScyllaDB.Alternator
             finally
             {
                 liveNodes.shutdownAndWait();
+            }
+        }
+
+        [Test]
+        public void ConfiguredRackAffinityStartsClusterDiscoveryWithoutRequestActivityTest()
+        {
+            var clusterNodes = new[]
+            {
+                "cluster-node1.example.com",
+                "cluster-node2.example.com",
+                "cluster-node3.example.com",
+            };
+            var rack1Handler = new ScopeAwareDiscoveryHttpMessageHandler("rack1-node.example.com", clusterNodes);
+            var rack2Handler = new ScopeAwareDiscoveryHttpMessageHandler("rack2-node.example.com", clusterNodes);
+            using var rack1HttpClient = new HttpClient(rack1Handler);
+            using var rack2HttpClient = new HttpClient(rack2Handler);
+            var affinity = KeyRouteAffinityConfig.builder()
+                .withType(KeyRouteAffinity.ANY_WRITE)
+                .withPkInfo("users", "id")
+                .build();
+            var rack1 = new AlternatorLiveNodes(
+                CreateRackScopedConfig(8043, "rack1", affinity, "rack1-seed.example.com"),
+                rack1HttpClient);
+            var rack2 = new AlternatorLiveNodes(
+                CreateRackScopedConfig(8043, "rack2", affinity, "rack2-seed.example.com"),
+                rack2HttpClient);
+
+            rack1.start().Wait(TimeSpan.FromSeconds(5));
+            rack2.start().Wait(TimeSpan.FromSeconds(5));
+            try
+            {
+                var rack1Interceptor = new AffinityQueryPlanInterceptor(affinity, rack1);
+                var rack2Interceptor = new AffinityQueryPlanInterceptor(affinity, rack2);
+                Assert.That(
+                    SpinWait.SpinUntil(
+                        () => rack1Handler.HasScopedAndClusterRequests && rack2Handler.HasScopedAndClusterRequests,
+                        TimeSpan.FromSeconds(5)),
+                    Is.True);
+
+                var request = new PutItemRequest
+                {
+                    TableName = "users",
+                    Item = new Dictionary<string, AttributeValue>
+                    {
+                        ["id"] = new AttributeValue { S = "same-partition" },
+                    },
+                };
+                var rack1Plan = rack1Interceptor
+                    .GetOrCreateQueryPlan(request, new Dictionary<string, object>())
+                    .ToList();
+                var rack2Plan = rack2Interceptor
+                    .GetOrCreateQueryPlan(request, new Dictionary<string, object>())
+                    .ToList();
+
+                Assert.That(rack1.getLiveNodes().Select(node => node.Host), Is.EqualTo(new[] { "rack1-node.example.com" }));
+                Assert.That(rack2.getLiveNodes().Select(node => node.Host), Is.EqualTo(new[] { "rack2-node.example.com" }));
+                Assert.That(rack1Plan, Is.EqualTo(rack2Plan));
+                Assert.That(rack1Plan.Select(node => node.Host), Is.EquivalentTo(clusterNodes));
+            }
+            finally
+            {
+                rack1.shutdownAndWait();
+                rack2.shutdownAndWait();
             }
         }
 
@@ -1018,14 +1083,22 @@ namespace ScyllaDB.Alternator
             KeyRouteAffinityConfig affinity,
             string seedHost = "127.0.0.1")
         {
-            var config = AlternatorConfig.builder()
+            return new AlternatorLiveNodes(CreateRackScopedConfig(port, rack, affinity, seedHost));
+        }
+
+        private static AlternatorConfig CreateRackScopedConfig(
+            int port,
+            string rack,
+            KeyRouteAffinityConfig affinity,
+            string seedHost)
+        {
+            return AlternatorConfig.builder()
                 .withSeedHost(seedHost)
                 .withScheme("http")
                 .withPort(port)
                 .withRoutingScope(RackScope.of("dc1", rack, ClusterScope.create()))
                 .withKeyRouteAffinity(affinity)
                 .build();
-            return new AlternatorLiveNodes(config);
         }
 
         private static HttpClient CreateAddressMappedHttpClient(
@@ -1157,11 +1230,42 @@ namespace ScyllaDB.Alternator
 
                 var responseBody = currentRequest switch
                 {
-                    1 => "[\"dc1-node1.example.com\",\"dc1-node2.example.com\"]",
-                    2 => "[\"dc2-node1.example.com\",\"dc2-node2.example.com\"]",
+                    1 => "[\"dc1-discovered1.example.com\",\"dc1-discovered2.example.com\"]",
+                    2 => "[\"dc2-discovered1.example.com\",\"dc2-discovered2.example.com\"]",
                     3 => "[\"partial.example.com\"]",
                     _ => throw new InvalidOperationException("Unexpected discovery request number: " + currentRequest),
                 };
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(responseBody, Encoding.UTF8, "application/json"),
+                });
+            }
+        }
+
+        private sealed class ScopeAwareDiscoveryHttpMessageHandler : HttpMessageHandler
+        {
+            private readonly string rackNode;
+            private readonly string clusterResponse;
+            private readonly System.Collections.Concurrent.ConcurrentQueue<Uri> requestedUris =
+                new System.Collections.Concurrent.ConcurrentQueue<Uri>();
+
+            internal ScopeAwareDiscoveryHttpMessageHandler(string rackNode, IEnumerable<string> clusterNodes)
+            {
+                this.rackNode = rackNode;
+                this.clusterResponse = System.Text.Json.JsonSerializer.Serialize(clusterNodes);
+            }
+
+            internal bool HasScopedAndClusterRequests =>
+                this.requestedUris.Any(uri => !string.IsNullOrEmpty(uri.Query))
+                && this.requestedUris.Any(uri => string.IsNullOrEmpty(uri.Query));
+
+            protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+            {
+                var uri = request.RequestUri ?? throw new InvalidOperationException("Request URI was not set.");
+                this.requestedUris.Enqueue(uri);
+                var responseBody = string.IsNullOrEmpty(uri.Query)
+                    ? this.clusterResponse
+                    : System.Text.Json.JsonSerializer.Serialize(new[] { this.rackNode });
                 return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
                 {
                     Content = new StringContent(responseBody, Encoding.UTF8, "application/json"),

@@ -779,7 +779,7 @@ namespace ScyllaDB.Alternator
         }
 
         [Test]
-        public void LazyQueryPlanPreferredNodesApplyOnlyToActiveNodesTest()
+        public void LazyQueryPlanPreferredNodesApplyToQuarantinedPrimaryNodesTest()
         {
             var quarantinedNodes = Uris("node2", "node1");
             var liveNodes = new HealthSplitLiveNodes(Array.Empty<Uri>(), quarantinedNodes);
@@ -787,7 +787,7 @@ namespace ScyllaDB.Alternator
 
             var planNodes = DrainQueryPlanUris(plan, quarantinedNodes.Count);
 
-            Assert.That(planNodes, Is.EqualTo(SortUris(quarantinedNodes)));
+            Assert.That(planNodes, Is.EqualTo(new[] { quarantinedNodes[0], quarantinedNodes[1] }));
         }
 
         [Test]
@@ -825,7 +825,27 @@ namespace ScyllaDB.Alternator
 
             var queryPlan = InvokeTryCreateBatchWriteAffinityQueryPlan(interceptor, request);
 
-            Assert.That(queryPlan, Is.Null);
+            Assert.That(queryPlan, Is.Not.Null);
+            Assert.That(liveNodes.ActiveNodesReadCount, Is.EqualTo(1));
+            Assert.That(
+                DrainQueryPlanUris(queryPlan!, quarantinedNodes.Count),
+                Is.EquivalentTo(quarantinedNodes));
+        }
+
+        [Test]
+        public void AffinityBatchWriteUsesOneTopologySnapshotForVotesAndRetriesTest()
+        {
+            var firstGeneration = Uris("old-node1", "old-node2", "old-node3");
+            var secondGeneration = Uris("new-node1", "new-node2", "new-node3");
+            var liveNodes = new SwitchingAffinityLiveNodes(firstGeneration, secondGeneration);
+            var affinity = BatchWriteAffinityConfig(PkInfo("orders", "id"));
+            var interceptor = new AffinityQueryPlanInterceptor(affinity, liveNodes);
+            var request = BatchWrite(Table("orders", Put(ItemWithId("order-1", "payload"))));
+
+            var queryPlan = InvokeTryCreateBatchWriteAffinityQueryPlan(interceptor, request);
+
+            Assert.That(queryPlan, Is.Not.Null);
+            Assert.That(DrainQueryPlanUris(queryPlan!, firstGeneration.Count), Is.EquivalentTo(firstGeneration));
             Assert.That(liveNodes.ActiveNodesReadCount, Is.EqualTo(1));
         }
 
@@ -1157,6 +1177,34 @@ namespace ScyllaDB.Alternator
                 }
 
                 return seedNodes;
+            }
+        }
+
+        private sealed class SwitchingAffinityLiveNodes : AlternatorLiveNodes
+        {
+            private readonly IReadOnlyList<Uri> firstGeneration;
+            private readonly IReadOnlyList<Uri> secondGeneration;
+
+            internal SwitchingAffinityLiveNodes(
+                IEnumerable<Uri> firstGeneration,
+                IEnumerable<Uri> secondGeneration)
+                : base(firstGeneration.Concat(secondGeneration).ToList(), "http", 8043, string.Empty, string.Empty)
+            {
+                this.firstGeneration = firstGeneration.ToList().AsReadOnly();
+                this.secondGeneration = secondGeneration.ToList().AsReadOnly();
+            }
+
+            internal int ActiveNodesReadCount { get; private set; }
+
+            protected override IReadOnlyList<Uri> GetActiveNodesInternal()
+            {
+                this.ActiveNodesReadCount++;
+                return this.ActiveNodesReadCount == 1 ? this.firstGeneration : this.secondGeneration;
+            }
+
+            protected override IReadOnlyList<Uri> GetQuarantinedNodesInternal()
+            {
+                return Array.Empty<Uri>();
             }
         }
     }
