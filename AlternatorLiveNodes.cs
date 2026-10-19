@@ -336,7 +336,7 @@ namespace ScyllaDB.Alternator
             List<Uri> nodes;
             try
             {
-                nodes = this.GetNodesForScope(scope);
+                nodes = this.GetNodesForScope(scope, scope.LocalNodesQuery);
             }
             catch (Exception e)
             {
@@ -694,6 +694,11 @@ namespace ScyllaDB.Alternator
 
         protected internal virtual IReadOnlyList<Uri> GetDownNodesInternal()
         {
+            if (!this.requiresAffinityNodes)
+            {
+                return this.healthStore.GetDownNodes();
+            }
+
             var lockTaken = this.EnterLiveNodesReadLock();
             try
             {
@@ -1094,13 +1099,17 @@ namespace ScyllaDB.Alternator
             this.liveNodesLock.EnterWriteLock();
             try
             {
+                var previousNodes = this.liveNodes;
                 this.liveNodes = nodes;
                 if (!this.requiresAffinityNodes)
                 {
                     this.affinityNodes = new List<Uri>(nodes);
                 }
 
-                this.healthStore.SetKnownNodes(this.liveNodes.Concat(this.affinityNodes));
+                // Keep records until auxiliary discovery determines the completed managed set.
+                this.healthStore.SetKnownNodes(this.requiresAffinityNodes
+                    ? previousNodes.Concat(this.liveNodes).Concat(this.affinityNodes)
+                    : this.liveNodes);
             }
             finally
             {
@@ -1108,12 +1117,16 @@ namespace ScyllaDB.Alternator
             }
         }
 
-        private void SetAffinityNodes(List<Uri> nodes)
+        private void CompleteAffinityRefresh(List<Uri>? nodes)
         {
             this.liveNodesLock.EnterWriteLock();
             try
             {
-                this.affinityNodes = nodes;
+                if (nodes != null)
+                {
+                    this.affinityNodes = nodes;
+                }
+
                 this.healthStore.SetKnownNodes(this.liveNodes.Concat(this.affinityNodes));
             }
             finally
@@ -1136,11 +1149,12 @@ namespace ScyllaDB.Alternator
 
                 try
                 {
-                    var key = (scope.GetType(), scope.LocalNodesQuery);
+                    var query = scope.LocalNodesQuery;
+                    var key = (scope.GetType(), query);
 
                     // Retain a failed attempt so affinity does not repeat it within this refresh.
                     discovered[key] = new List<Uri>();
-                    var nodes = this.GetNodesForScope(scope);
+                    var nodes = this.GetNodesForScope(scope, query);
                     discovered[key] = nodes;
                     if (nodes.Count != 0)
                     {
@@ -1183,37 +1197,49 @@ namespace ScyllaDB.Alternator
                 return;
             }
 
-            foreach (var scope in CreateAffinityScopes(this.config.RoutingScope))
+            List<Uri>? refreshedNodes = null;
+            try
             {
-                try
+                foreach (var scope in CreateAffinityScopes(this.config.RoutingScope))
                 {
-                    var key = (scope.GetType(), scope.LocalNodesQuery);
-                    if (!discovered.TryGetValue(key, out var nodes))
+                    try
                     {
-                        discovered[key] = new List<Uri>();
-                        nodes = this.GetNodesForScope(scope);
-                        discovered[key] = nodes;
-                    }
+                        var query = scope.LocalNodesQuery;
+                        var key = (scope.GetType(), query);
+                        if (!discovered.TryGetValue(key, out var nodes))
+                        {
+                            discovered[key] = new List<Uri>();
+                            nodes = this.GetNodesForScope(scope, query);
+                            discovered[key] = nodes;
+                        }
 
-                    if (nodes.Count != 0)
+                        if (nodes.Count != 0)
+                        {
+                            refreshedNodes = new List<Uri>(nodes);
+                            Logger.Info($"Updated key-route affinity hosts to {string.Join(", ", nodes)} using {scope.Description}");
+                            return;
+                        }
+                    }
+                    catch (Exception e)
                     {
-                        this.SetAffinityNodes(new List<Uri>(nodes));
-                        Logger.Info($"Updated key-route affinity hosts to {string.Join(", ", nodes)} using {scope.Description}");
-                        return;
+                        Logger.Warn(e, $"Failed to discover key-route affinity nodes for {scope.Description}");
                     }
                 }
-                catch (Exception e)
-                {
-                    Logger.Warn(e, $"Failed to discover key-route affinity nodes for {scope.Description}");
-                }
+
+                Logger.Warn("No nodes found in any affinity scope; keeping existing affinity nodes");
             }
-
-            Logger.Warn("No nodes found in any affinity scope; keeping existing affinity nodes");
+            catch (Exception e)
+            {
+                Logger.Warn(e, "Failed to traverse affinity scopes; keeping existing affinity nodes");
+            }
+            finally
+            {
+                this.CompleteAffinityRefresh(refreshedNodes);
+            }
         }
 
-        private List<Uri> GetNodesForScope(RoutingScope scope)
+        private List<Uri> GetNodesForScope(RoutingScope scope, string query)
         {
-            var query = scope.LocalNodesQuery;
             var requestQuery = string.IsNullOrEmpty(query) ? null : query;
             Exception? lastException = null;
             var nodes = new List<Uri>();

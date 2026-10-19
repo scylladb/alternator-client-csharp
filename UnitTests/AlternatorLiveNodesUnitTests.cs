@@ -641,14 +641,14 @@ namespace ScyllaDB.Alternator
         [Test]
         public void ConfiguredRackAffinityStartsDatacenterDiscoveryWithoutRequestActivityTest()
         {
-            var clusterNodes = new[]
+            var datacenterNodes = new[]
             {
-                "cluster-node1.example.com",
-                "cluster-node2.example.com",
-                "cluster-node3.example.com",
+                "datacenter-node1.example.com",
+                "datacenter-node2.example.com",
+                "datacenter-node3.example.com",
             };
-            var rack1Handler = new ScopeAwareDiscoveryHttpMessageHandler("rack1-node.example.com", clusterNodes);
-            var rack2Handler = new ScopeAwareDiscoveryHttpMessageHandler("rack2-node.example.com", clusterNodes);
+            var rack1Handler = new ScopeAwareDiscoveryHttpMessageHandler("rack1-node.example.com", datacenterNodes);
+            var rack2Handler = new ScopeAwareDiscoveryHttpMessageHandler("rack2-node.example.com", datacenterNodes);
             using var rack1HttpClient = new HttpClient(rack1Handler);
             using var rack2HttpClient = new HttpClient(rack2Handler);
             var affinity = KeyRouteAffinityConfig.builder()
@@ -669,8 +669,8 @@ namespace ScyllaDB.Alternator
                 Assert.That(
                     SpinWait.SpinUntil(
                         () => rack1Handler.HasRackAndDatacenterRequests && rack2Handler.HasRackAndDatacenterRequests
-                            && LazyQueryPlan.sortedAffinityNodes(rack1).Select(node => node.Host).SequenceEqual(clusterNodes)
-                            && LazyQueryPlan.sortedAffinityNodes(rack2).Select(node => node.Host).SequenceEqual(clusterNodes),
+                            && LazyQueryPlan.sortedAffinityNodes(rack1).Select(node => node.Host).SequenceEqual(datacenterNodes)
+                            && LazyQueryPlan.sortedAffinityNodes(rack2).Select(node => node.Host).SequenceEqual(datacenterNodes),
                         TimeSpan.FromSeconds(5)),
                     Is.True);
                 var rack1Interceptor = new AffinityQueryPlanInterceptor(affinity, rack1);
@@ -694,7 +694,7 @@ namespace ScyllaDB.Alternator
                 Assert.That(rack1.getLiveNodes().Select(node => node.Host), Is.EqualTo(new[] { "rack1-node.example.com" }));
                 Assert.That(rack2.getLiveNodes().Select(node => node.Host), Is.EqualTo(new[] { "rack2-node.example.com" }));
                 Assert.That(rack1Plan, Is.EqualTo(rack2Plan));
-                Assert.That(rack1Plan.Select(node => node.Host), Is.EquivalentTo(clusterNodes));
+                Assert.That(rack1Plan.Select(node => node.Host), Is.EquivalentTo(datacenterNodes));
             }
             finally
             {
@@ -781,6 +781,183 @@ namespace ScyllaDB.Alternator
             Assert.That(liveNodes.GetLiveNodes().Select(node => node.Host), Is.EqualTo(new[] { "node.example.com" }));
             Assert.That(LazyQueryPlan.sortedAffinityNodes(liveNodes), Is.EqualTo(liveNodes.GetLiveNodes()));
             Assert.That(handler.RequestedUris.Select(uri => uri.Query), Is.EqualTo(new[] { "?dc=custom" }));
+        }
+
+        [Test]
+        public void CustomDiscoveryQueryIsEvaluatedOncePerRefreshTest()
+        {
+            var queryReads = 0;
+            var scope = new TrackingRoutingScope(query: () => ++queryReads % 2 == 1 ? "dc=A" : "dc=B");
+            using var server = new LocalNodesServer(
+                2,
+                request => request.Query == "dc=A" ? "[\"127.0.0.2\"]" : "[\"127.0.0.3\"]");
+            var liveNodes = new AlternatorLiveNodes(AlternatorConfig.builder()
+                .withSeedHost("127.0.0.1")
+                .withScheme("http")
+                .withPort(server.Port)
+                .withRoutingScope(scope)
+                .build());
+
+            InvokeUpdateLiveNodes(liveNodes);
+            var firstNodes = liveNodes.GetLiveNodes();
+            InvokeUpdateLiveNodes(liveNodes);
+            server.WaitForRequests();
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(queryReads, Is.EqualTo(2));
+                Assert.That(server.Requests.Select(request => request.Query), Is.EqualTo(new[] { "dc=A", "dc=B" }));
+                Assert.That(firstNodes.Select(node => node.Host), Is.EqualTo(new[] { "127.0.0.2" }));
+                Assert.That(liveNodes.GetLiveNodes().Select(node => node.Host), Is.EqualTo(new[] { "127.0.0.3" }));
+                Assert.That(scope.FallbackReads, Is.Zero);
+            });
+        }
+
+        [TestCase(false, false)]
+        [TestCase(true, false)]
+        [TestCase(false, true)]
+        public void AffinityRefreshPreservesRetainedHealthAndLiveObservationsTest(bool quarantined, bool observeDuringRefresh)
+        {
+            var phase = 0;
+            Uri? firstNode = null;
+            AlternatorLiveNodes? liveNodes = null;
+            using var server = new LocalNodesServer(
+                6,
+                request =>
+                {
+                    if (request.Query.Contains("&rack="))
+                    {
+                        return phase == 0 ? "[\"127.0.0.2\"]" : "[\"127.0.0.3\"]";
+                    }
+
+                    if (phase == 1 && observeDuringRefresh)
+                    {
+                        liveNodes!.ReportNodeResult(firstNode!, NodeHealthObservation.Success);
+                    }
+
+                    return phase == 1 ? "[\"127.0.0.2\"]" : "[\"127.0.0.3\"]";
+                });
+            firstNode = new Uri($"http://127.0.0.2:{server.Port}");
+            liveNodes = new AlternatorLiveNodes(AlternatorConfig.builder()
+                .withSeedHost("127.0.0.1")
+                .withScheme("http")
+                .withPort(server.Port)
+                .withRoutingScope(RackScope.of("dc1", "rack1", null))
+                .withKeyRouteAffinity(KeyRouteAffinity.ANY_WRITE)
+                .withNodeHealth(NodeHealthStoreConfig.builder().withQuarantineSuccessThreshold(3).build())
+                .build());
+            InvokeUpdateLiveNodes(liveNodes);
+            liveNodes.ReportNodeResult(firstNode, NodeHealthObservation.ConnectionFailure);
+            if (quarantined)
+            {
+                liveNodes.ReportNodeResult(firstNode, NodeHealthObservation.Success);
+            }
+
+            var before = liveNodes.GetNodeStatus(firstNode) ?? throw new InvalidOperationException("Initial node health is missing.");
+            phase = 1;
+            InvokeUpdateLiveNodes(liveNodes);
+            var after = liveNodes.GetNodeStatus(firstNode) ?? throw new InvalidOperationException("Retained node health is missing.");
+            var plan = new LazyQueryPlan(liveNodes, 42L).ToList();
+            phase = 2;
+            InvokeUpdateLiveNodes(liveNodes);
+            server.WaitForRequests();
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(after.State, Is.EqualTo(quarantined || observeDuringRefresh ? NodeHealthState.Quarantined : NodeHealthState.Down));
+                Assert.That(after.ConsecutiveSuccesses, Is.EqualTo(quarantined || observeDuringRefresh ? 1 : 0));
+                Assert.That(after.ConsecutiveServerErrors, Is.EqualTo(observeDuringRefresh ? 0 : before.ConsecutiveServerErrors));
+                if (!observeDuringRefresh)
+                {
+                    Assert.That(after.UpdatedAt, Is.EqualTo(before.UpdatedAt));
+                }
+
+                if (!quarantined && !observeDuringRefresh)
+                {
+                    Assert.That(plan, Does.Not.Contain(firstNode));
+                    Assert.That(plan.Select(node => node.Host), Is.EqualTo(new[] { "127.0.0.3" }));
+                }
+
+                Assert.That(liveNodes.GetNodeStatus(firstNode), Is.Null);
+                Assert.That(server.Requests.All(request => request.Host.StartsWith("127.0.0.1:", StringComparison.Ordinal)), Is.True);
+            });
+        }
+
+        [TestCase("[]")]
+        [TestCase("invalid JSON")]
+        [TestCase("throwing fallback")]
+        public void AffinityRefreshFinalizesHealthAfterUnsuccessfulDiscoveryTest(string response)
+        {
+            var phase = 0;
+            var throwingFallback = response == "throwing fallback";
+            using var server = new LocalNodesServer(
+                throwingFallback ? 5 : 4,
+                request => request.Query.Contains("&rack=")
+                    ? phase == 0 ? "[\"127.0.0.2\"]" : "[\"127.0.0.4\"]"
+                    : phase == 0 ? "[\"127.0.0.3\"]" : request.Query == "dc=custom" ? "[]" : response);
+            var liveNodes = new AlternatorLiveNodes(AlternatorConfig.builder()
+                .withSeedHost("127.0.0.1")
+                .withScheme("http")
+                .withPort(server.Port)
+                .withRoutingScope(RackScope.of("dc1", "rack1", throwingFallback ? new TrackingRoutingScope() : null))
+                .withKeyRouteAffinity(KeyRouteAffinity.ANY_WRITE)
+                .build());
+            var departedNode = new Uri($"http://127.0.0.2:{server.Port}");
+            var retainedNode = new Uri($"http://127.0.0.3:{server.Port}");
+            InvokeUpdateLiveNodes(liveNodes);
+            liveNodes.ReportNodeResult(departedNode, NodeHealthObservation.ConnectionFailure);
+            liveNodes.ReportNodeResult(retainedNode, NodeHealthObservation.ConnectionFailure);
+            phase = 1;
+            InvokeUpdateLiveNodes(liveNodes);
+            server.WaitForRequests();
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(liveNodes.GetLiveNodes().Select(node => node.Host), Is.EqualTo(new[] { "127.0.0.4" }));
+                Assert.That(liveNodes.GetNodeStatus(departedNode), Is.Null);
+                Assert.That(liveNodes.GetNodeStatus(retainedNode)?.State, Is.EqualTo(NodeHealthState.Down));
+                Assert.That(liveNodes.GetDownNodes(), Is.EqualTo(new[] { retainedNode }));
+            });
+        }
+
+        [Test]
+        public void AuxiliaryCustomFallbackFailureKeepsSuccessfulOrdinaryDiscoveryTest()
+        {
+            var handler = new ScopeAwareDiscoveryHttpMessageHandler("ordinary.example.com", Array.Empty<string>());
+            using var client = new HttpClient(handler);
+            var queryReads = 0;
+            var fallback = new TrackingRoutingScope(query: () =>
+            {
+                queryReads++;
+                throw new InvalidOperationException("Auxiliary custom query is unavailable.");
+            });
+            var liveNodes = new AlternatorLiveNodes(
+                AlternatorConfig.builder()
+                    .withSeedHost("seed.example.com")
+                    .withScheme("http")
+                    .withPort(8043)
+                    .withRoutingScope(RackScope.of("dc1", "rack1", fallback))
+                    .withKeyRouteAffinity(KeyRouteAffinity.ANY_WRITE)
+                    .build(),
+                client);
+            Exception? failure = null;
+            try
+            {
+                InvokeUpdateLiveNodes(liveNodes);
+            }
+            catch (System.Reflection.TargetInvocationException exception)
+            {
+                failure = exception.InnerException;
+            }
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(failure, Is.Null);
+                Assert.That(queryReads, Is.EqualTo(1));
+                Assert.That(fallback.FallbackReads, Is.EqualTo(1));
+                Assert.That(liveNodes.GetLiveNodes().Select(node => node.Host), Is.EqualTo(new[] { "ordinary.example.com" }));
+                Assert.That(handler.RequestedUris.Select(uri => uri.Query), Is.EqualTo(new[] { "?dc=dc1&rack=rack1", "?dc=dc1" }));
+            });
         }
 
         [Test]
@@ -1062,10 +1239,16 @@ namespace ScyllaDB.Alternator
                 .withRoutingScope(RackScope.of("dc1", "rack1", ClusterScope.create()))
                 .build();
             var liveNodes = new AffinityActivatingLiveNodes(config, client);
-
-            Assert.That(liveNodes.NextAsUri(), Is.EqualTo(localNode));
-            Assert.That(liveNodes.GetLiveNodes(), Is.EqualTo(new[] { localNode }));
-            Assert.That(liveNodes.GetActiveNodes(), Is.EqualTo(new[] { localNode, remoteNode }));
+            try
+            {
+                Assert.That(liveNodes.NextAsUri(), Is.EqualTo(localNode));
+                Assert.That(liveNodes.GetLiveNodes(), Is.EqualTo(new[] { localNode }));
+                Assert.That(liveNodes.GetActiveNodes(), Is.EqualTo(new[] { localNode, remoteNode }));
+            }
+            finally
+            {
+                Assert.That(liveNodes.ShutdownAndWait(), Is.True);
+            }
         }
 
         [Test]
@@ -1084,30 +1267,37 @@ namespace ScyllaDB.Alternator
                 .withNodeHealth(NodeHealthStoreConfig.builder().withQuarantineSuccessThreshold(1).build())
                 .build();
             var liveNodes = new AlternatorLiveNodes(config, client);
-            InvokeUpdateLiveNodes(liveNodes);
-            liveNodes.ReportNodeResult(localNode, NodeHealthObservation.ConnectionFailure);
-            liveNodes.ReportNodeResult(remoteNode, NodeHealthObservation.ConnectionFailure);
-            var method = typeof(AlternatorLiveNodes).GetMethod(
-                "SelectNextUri",
-                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
-            Assert.That(method, Is.Not.Null);
+            try
+            {
+                InvokeUpdateLiveNodes(liveNodes);
+                liveNodes.ReportNodeResult(localNode, NodeHealthObservation.ConnectionFailure);
+                liveNodes.ReportNodeResult(remoteNode, NodeHealthObservation.ConnectionFailure);
+                var method = typeof(AlternatorLiveNodes).GetMethod(
+                    "SelectNextUri",
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                Assert.That(method, Is.Not.Null);
 
-            Assert.That(method!.Invoke(liveNodes, Array.Empty<object>()), Is.EqualTo(localNode));
+                Assert.That(method!.Invoke(liveNodes, Array.Empty<object>()), Is.EqualTo(localNode));
 
-            Assert.That(handler.RequestedUris.Skip(2).Select(uri => uri.Host), Is.EqualTo(new[] { localNode.Host }));
-            Assert.That(liveNodes.GetNodeStatus(localNode)?.State, Is.EqualTo(NodeHealthState.Active));
-            Assert.That(liveNodes.GetDownNodes(), Is.EqualTo(new[] { remoteNode }));
-            Assert.That(liveNodes.ProbeDownNodesAsync().GetAwaiter().GetResult(), Is.EqualTo(new[] { remoteNode }));
-            Assert.That(liveNodes.GetNodeStatus(remoteNode)?.State, Is.EqualTo(NodeHealthState.Active));
-            Assert.That(handler.RequestedUris.Last().Host, Is.EqualTo(remoteNode.Host));
-            Assert.That(liveNodes.GetActiveNodes(), Is.EqualTo(new[] { localNode, remoteNode }));
-            Assert.That(liveNodes.GetQuarantinedNodes(), Is.Empty);
-            Assert.That(liveNodes.GetDownNodes(), Is.Empty);
-            Assert.That(liveNodes.NextAsUri(), Is.EqualTo(localNode));
-            Assert.That(new LazyQueryPlan(liveNodes).ToList(), Is.EqualTo(new[] { localNode }));
-            Assert.That(
-                LazyQueryPlan.sortedAffinityNodes(liveNodes),
-                Is.EqualTo(new[] { localNode, remoteNode }));
+                Assert.That(handler.RequestedUris.Skip(2).Select(uri => uri.Host), Is.EqualTo(new[] { localNode.Host }));
+                Assert.That(liveNodes.GetNodeStatus(localNode)?.State, Is.EqualTo(NodeHealthState.Active));
+                Assert.That(liveNodes.GetDownNodes(), Is.EqualTo(new[] { remoteNode }));
+                Assert.That(liveNodes.ProbeDownNodesAsync().GetAwaiter().GetResult(), Is.EqualTo(new[] { remoteNode }));
+                Assert.That(liveNodes.GetNodeStatus(remoteNode)?.State, Is.EqualTo(NodeHealthState.Active));
+                Assert.That(handler.RequestedUris.Last().Host, Is.EqualTo(remoteNode.Host));
+                Assert.That(liveNodes.GetActiveNodes(), Is.EqualTo(new[] { localNode, remoteNode }));
+                Assert.That(liveNodes.GetQuarantinedNodes(), Is.Empty);
+                Assert.That(liveNodes.GetDownNodes(), Is.Empty);
+                Assert.That(liveNodes.NextAsUri(), Is.EqualTo(localNode));
+                Assert.That(new LazyQueryPlan(liveNodes).ToList(), Is.EqualTo(new[] { localNode }));
+                Assert.That(
+                    LazyQueryPlan.sortedAffinityNodes(liveNodes),
+                    Is.EqualTo(new[] { localNode, remoteNode }));
+            }
+            finally
+            {
+                Assert.That(liveNodes.ShutdownAndWait(), Is.True);
+            }
         }
 
         [Test]
@@ -1926,10 +2116,12 @@ namespace ScyllaDB.Alternator
         private sealed class TrackingRoutingScope : RoutingScope
         {
             private readonly RoutingScope? fallback;
+            private readonly Func<string>? query;
 
-            internal TrackingRoutingScope(RoutingScope? fallback = null)
+            internal TrackingRoutingScope(RoutingScope? fallback = null, Func<string>? query = null)
             {
                 this.fallback = fallback;
+                this.query = query;
             }
 
             public string Name => "Custom";
@@ -1945,7 +2137,7 @@ namespace ScyllaDB.Alternator
                 }
             }
 
-            public string LocalNodesQuery => "dc=custom";
+            public string LocalNodesQuery => this.query?.Invoke() ?? "dc=custom";
 
             internal int FallbackReads { get; private set; }
         }
@@ -1953,14 +2145,14 @@ namespace ScyllaDB.Alternator
         private sealed class ScopeAwareDiscoveryHttpMessageHandler : HttpMessageHandler
         {
             private readonly string rackNode;
-            private readonly string clusterResponse;
+            private readonly string datacenterResponse;
             private readonly System.Collections.Concurrent.ConcurrentQueue<Uri> requestedUris =
                 new System.Collections.Concurrent.ConcurrentQueue<Uri>();
 
-            internal ScopeAwareDiscoveryHttpMessageHandler(string rackNode, IEnumerable<string> clusterNodes)
+            internal ScopeAwareDiscoveryHttpMessageHandler(string rackNode, IEnumerable<string> datacenterNodes)
             {
                 this.rackNode = rackNode;
-                this.clusterResponse = System.Text.Json.JsonSerializer.Serialize(clusterNodes);
+                this.datacenterResponse = System.Text.Json.JsonSerializer.Serialize(datacenterNodes);
             }
 
             internal bool HasRackAndDatacenterRequests =>
@@ -1974,7 +2166,7 @@ namespace ScyllaDB.Alternator
                 var uri = request.RequestUri ?? throw new InvalidOperationException("Request URI was not set.");
                 this.requestedUris.Enqueue(uri);
                 var responseBody = uri.Query == "?dc=dc1"
-                    ? this.clusterResponse
+                    ? this.datacenterResponse
                     : System.Text.Json.JsonSerializer.Serialize(new[] { this.rackNode });
                 return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
                 {
