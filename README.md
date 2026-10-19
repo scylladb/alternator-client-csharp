@@ -119,10 +119,6 @@ that request. With only one seed, discovery usually covers only that seed node's
 datacenter, so cluster scope will not route across datacenters unless the client
 is given reachable seeds from all datacenters.
 
-A cluster-wide refresh is published only after every configured seed returns a
-non-empty node list. If a refresh is incomplete, the last complete topology is
-retained.
-
 ```csharp
 AmazonDynamoDBClient client = AlternatorDynamoDBClient.builder()
     .withScheme("https")
@@ -455,10 +451,20 @@ AmazonDynamoDBClient client = AlternatorDynamoDBClient.builder()
     .build();
 ```
 
-When key-route affinity is combined with a rack or datacenter routing scope,
-qualifying writes use the cluster-wide node set so the same partition key selects
-the same coordinator from every rack. Requests that do not qualify for affinity
-continue to use the configured local routing scope.
+When key-route affinity is enabled and the configured scope chain contains a rack
+restriction, qualifying writes use an additional affinity view. Its discovery
+chain replaces each rack restriction with its named datacenter and preserves all
+explicit fallbacks in order. For example, `rack(A,r1) → rack(B,r2) → cluster`
+becomes `DC(A) → DC(B) → cluster`; no implicit fallback is added. Named
+datacenters are discovered through `/localnodes?dc=<configured-dc>`.
+
+After successful DC discovery, clients in different racks of that DC use the same
+membership for the same eligible key, including batch voting and retries. Other
+DCs remain excluded while the preferred DC is usable. Ordinary requests continue
+to use the configured routing scope. Existing startup and discovery-failure
+fallbacks remain available, including temporary rack or seed membership before
+successful discovery or during failures. Disabled affinity and chains without a
+rack restriction need no additional discovery.
 
 ## AlternatorLiveNodes
 

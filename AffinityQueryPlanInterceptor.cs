@@ -55,7 +55,7 @@ namespace ScyllaDB.Alternator
             this.partitionKeyResolver = partitionKeyResolver;
             if (config?.IsEnabled == true)
             {
-                this.LiveNodes.EnableClusterWideAffinityNodes();
+                this.LiveNodes.EnableAffinityNodes();
             }
         }
 
