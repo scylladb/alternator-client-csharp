@@ -76,7 +76,6 @@ namespace ScyllaDB.Alternator.KeyRouting
             this.preferredNodes = new List<Uri>(preferredNodes);
         }
 
-#pragma warning disable SA1202
         internal LazyQueryPlan(
             IEnumerable<Uri> primaryNodes,
             IEnumerable<Uri> fallbackNodes,
@@ -253,7 +252,6 @@ namespace ScyllaDB.Alternator.KeyRouting
             return this.GetEnumerator();
         }
 #pragma warning restore SA1300, IDE1006
-#pragma warning restore SA1202
 
         internal static Uri? PreferredNodeForHash(IEnumerable<Uri> nodes, long seed)
         {
@@ -307,20 +305,13 @@ namespace ScyllaDB.Alternator.KeyRouting
                 return;
             }
 
-            if (this.fixedNodes != null)
+            this.remaining = new List<Uri>(this.fixedNodes!);
+            this.fallbackRemaining = new List<Uri>(this.fixedFallbackNodes!);
+            SortAffinityNodes(this.remaining);
+            SortAffinityNodes(this.fallbackRemaining);
+            if (this.preferredNodes != null)
             {
-                this.remaining = new List<Uri>(this.fixedNodes);
-                this.fallbackRemaining = new List<Uri>(this.fixedFallbackNodes ?? Enumerable.Empty<Uri>());
-                SortAffinityNodes(this.remaining);
-                SortAffinityNodes(this.fallbackRemaining);
-                if (this.preferredNodes != null)
-                {
-                    this.remaining = OrderPreferredNodesFirst(this.remaining, this.preferredNodes);
-                }
-            }
-            else
-            {
-                throw new InvalidOperationException("Seeded query plans require a captured node snapshot");
+                this.remaining = OrderPreferredNodesFirst(this.remaining, this.preferredNodes);
             }
 
             this.initialized = true;
@@ -350,12 +341,12 @@ namespace ScyllaDB.Alternator.KeyRouting
                 return this.nextNode;
             }
 
-            var availableNodes = this.liveNodes.GetActiveNodesInternal()
+            var availableNodes = this.liveNodes.GetOrdinaryActiveNodes()
                 .Where(node => !this.usedNodes.Contains(node))
                 .ToList();
             if (availableNodes.Count == 0)
             {
-                availableNodes = this.liveNodes.GetQuarantinedNodesInternal()
+                availableNodes = this.liveNodes.GetOrdinaryQuarantinedNodes()
                     .Where(node => !this.usedNodes.Contains(node))
                     .ToList();
             }

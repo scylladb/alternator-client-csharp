@@ -1018,6 +1018,56 @@ namespace ScyllaDB.Alternator
             Assert.That(new LazyQueryPlan(liveNodes, ordinaryNodes).ToList(), Is.EqualTo(ordinaryNodes));
         }
 
+        [TestCase(false)]
+        [TestCase(true)]
+        public void HashHelperUsesOrdinaryFallbackWhenAffinityIsDownTest(bool quarantined)
+        {
+            using var server = new LocalNodesServer(
+                2,
+                request => request.Query == "dc=dc1" ? "[\"127.0.0.5\"]" : "[\"127.0.0.2\",\"127.0.0.3\"]");
+            var affinity = KeyRouteAffinityConfig.builder().withType(KeyRouteAffinity.ANY_WRITE).build();
+            var liveNodes = CreateRackScopedLiveNodes(server.Port, "rack1", affinity);
+            InvokeUpdateLiveNodes(liveNodes);
+            server.WaitForRequests();
+            liveNodes.ReportNodeResult(new Uri($"http://127.0.0.5:{server.Port}"), NodeHealthObservation.ConnectionFailure);
+            var ordinaryNodes = liveNodes.GetLiveNodes();
+            if (quarantined)
+            {
+                foreach (var node in ordinaryNodes)
+                {
+                    liveNodes.ReportNodeResult(node, NodeHealthObservation.ConnectionFailure);
+                    liveNodes.ReportNodeResult(node, NodeHealthObservation.Success);
+                    Assert.That(liveNodes.GetNodeStatus(node)?.State, Is.EqualTo(NodeHealthState.Quarantined));
+                }
+            }
+
+            var method = typeof(AlternatorLiveNodes).GetMethod(
+                "GetNodeForHash",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+            Assert.That(method, Is.Not.Null);
+            Assert.That(method!.Invoke(liveNodes, new object[] { -1L }), Is.EqualTo(ordinaryNodes.Last()));
+        }
+
+        [Test]
+        public void OrdinarySelectionStaysLocalWhenAffinityActivatesDuringHealthReadTest()
+        {
+            var localNode = new Uri("http://local.example.com:8043");
+            var remoteNode = new Uri("http://remote.example.com:8043");
+            var handler = new ScopeAwareDiscoveryHttpMessageHandler(localNode.Host, new[] { localNode.Host, remoteNode.Host });
+            using var client = new HttpClient(handler);
+            var config = AlternatorConfig.builder()
+                .withSeedHost(localNode.Host)
+                .withScheme("http")
+                .withPort(localNode.Port)
+                .withRoutingScope(RackScope.of("dc1", "rack1", ClusterScope.create()))
+                .build();
+            var liveNodes = new AffinityActivatingLiveNodes(config, client);
+
+            Assert.That(liveNodes.NextAsUri(), Is.EqualTo(localNode));
+            Assert.That(liveNodes.GetLiveNodes(), Is.EqualTo(new[] { localNode }));
+            Assert.That(liveNodes.GetActiveNodes(), Is.EqualTo(new[] { localNode, remoteNode }));
+        }
+
         [Test]
         public void OrdinaryRecoverySkipsAffinityOnlyDownNodesAndExplicitProbeRecoversThemTest()
         {
@@ -1050,6 +1100,11 @@ namespace ScyllaDB.Alternator
             Assert.That(liveNodes.ProbeDownNodesAsync().GetAwaiter().GetResult(), Is.EqualTo(new[] { remoteNode }));
             Assert.That(liveNodes.GetNodeStatus(remoteNode)?.State, Is.EqualTo(NodeHealthState.Active));
             Assert.That(handler.RequestedUris.Last().Host, Is.EqualTo(remoteNode.Host));
+            Assert.That(liveNodes.GetActiveNodes(), Is.EqualTo(new[] { localNode, remoteNode }));
+            Assert.That(liveNodes.GetQuarantinedNodes(), Is.Empty);
+            Assert.That(liveNodes.GetDownNodes(), Is.Empty);
+            Assert.That(liveNodes.NextAsUri(), Is.EqualTo(localNode));
+            Assert.That(new LazyQueryPlan(liveNodes).ToList(), Is.EqualTo(new[] { localNode }));
             Assert.That(
                 LazyQueryPlan.sortedAffinityNodes(liveNodes),
                 Is.EqualTo(new[] { localNode, remoteNode }));
@@ -1081,6 +1136,11 @@ namespace ScyllaDB.Alternator
             server.WaitForRequests();
 
             Assert.That(liveNodes.getNodeStatus(remoteNode)?.State, Is.EqualTo(NodeHealthState.Quarantined));
+            Assert.That(liveNodes.getQuarantinedNodes(), Is.EqualTo(new[] { remoteNode }));
+            Assert.That(liveNodes.getDownNodes(), Is.Empty);
+            Assert.That(
+                new LazyQueryPlan(liveNodes).Select(node => node.Host),
+                Is.EqualTo(new[] { "127.0.0.1" }));
             Assert.That(server.Requests[2].Host, Is.EqualTo($"localhost:{server.Port}"));
             Assert.That(server.Requests[2].Query, Is.EqualTo("dc=dc1&rack=rack1"));
         }
@@ -1722,6 +1782,29 @@ namespace ScyllaDB.Alternator
                 },
             };
             return new HttpClient(handler, disposeHandler: true);
+        }
+
+        private sealed class AffinityActivatingLiveNodes : AlternatorLiveNodes
+        {
+            private bool activated;
+
+            public AffinityActivatingLiveNodes(AlternatorConfig config, HttpClient client)
+                : base(config, client)
+            {
+            }
+
+            protected override IReadOnlyList<Uri> GetActiveNodesInternal()
+            {
+                if (!this.activated)
+                {
+                    this.activated = true;
+                    var affinity = KeyRouteAffinityConfig.builder().withType(KeyRouteAffinity.ANY_WRITE).build();
+                    _ = new AffinityQueryPlanInterceptor(affinity, this);
+                    InvokeUpdateLiveNodes(this);
+                }
+
+                return base.GetActiveNodesInternal();
+            }
         }
 
         private sealed class TrackingHttpMessageHandler : HttpMessageHandler

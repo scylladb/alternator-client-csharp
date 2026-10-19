@@ -514,7 +514,8 @@ namespace ScyllaDB.Alternator
 
         internal Uri GetNodeForHash(long hash)
         {
-            var nodes = this.CaptureAffinityQueryPlanNodes().PrimaryNodes;
+            var snapshot = this.CaptureQueryPlanNodes();
+            var nodes = snapshot.PrimaryNodes.Count != 0 ? snapshot.PrimaryNodes : snapshot.FallbackNodes;
 
             if (nodes.Count == 0)
             {
@@ -556,6 +557,52 @@ namespace ScyllaDB.Alternator
             }
         }
 
+        internal IReadOnlyList<Uri> GetOrdinaryActiveNodes()
+        {
+            if (!this.requiresAffinityNodes)
+            {
+                var nodes = this.GetActiveNodesInternal();
+
+                // Activation may race the unlocked health snapshot.
+                if (!this.requiresAffinityNodes)
+                {
+                    return nodes;
+                }
+            }
+
+            var lockTaken = this.EnterLiveNodesReadLock();
+            try
+            {
+                return FilterHealthNodes(this.GetActiveNodesInternal(), this.liveNodes);
+            }
+            finally
+            {
+                this.ExitLiveNodesReadLock(lockTaken);
+            }
+        }
+
+        internal IReadOnlyList<Uri> GetOrdinaryQuarantinedNodes()
+        {
+            if (!this.requiresAffinityNodes)
+            {
+                var nodes = this.GetQuarantinedNodesInternal();
+                if (!this.requiresAffinityNodes)
+                {
+                    return nodes;
+                }
+            }
+
+            var lockTaken = this.EnterLiveNodesReadLock();
+            try
+            {
+                return FilterHealthNodes(this.GetQuarantinedNodesInternal(), this.liveNodes);
+            }
+            finally
+            {
+                this.ExitLiveNodesReadLock(lockTaken);
+            }
+        }
+
         internal (IReadOnlyList<Uri> PrimaryNodes, IReadOnlyList<Uri> FallbackNodes) CaptureAffinityQueryPlanNodes(
             bool allowQuarantinedPrimary = true)
         {
@@ -587,8 +634,8 @@ namespace ScyllaDB.Alternator
                 }
 
                 return (
-                    this.GetActiveNodesInternal().ToList().AsReadOnly(),
-                    this.GetQuarantinedNodesInternal().ToList().AsReadOnly());
+                    this.GetOrdinaryActiveNodes().ToList().AsReadOnly(),
+                    this.GetOrdinaryQuarantinedNodes().ToList().AsReadOnly());
             }
             finally
             {
@@ -611,10 +658,15 @@ namespace ScyllaDB.Alternator
 
         protected internal virtual IReadOnlyList<Uri> GetActiveNodesInternal()
         {
+            if (!this.requiresAffinityNodes)
+            {
+                return this.healthStore.GetActiveNodes();
+            }
+
             var lockTaken = this.EnterLiveNodesReadLock();
             try
             {
-                return FilterHealthNodes(this.healthStore.GetActiveNodes(), this.liveNodes);
+                return this.healthStore.GetActiveNodes();
             }
             finally
             {
@@ -624,10 +676,15 @@ namespace ScyllaDB.Alternator
 
         protected internal virtual IReadOnlyList<Uri> GetQuarantinedNodesInternal()
         {
+            if (!this.requiresAffinityNodes)
+            {
+                return this.healthStore.GetQuarantinedNodes();
+            }
+
             var lockTaken = this.EnterLiveNodesReadLock();
             try
             {
-                return FilterHealthNodes(this.healthStore.GetQuarantinedNodes(), this.liveNodes);
+                return this.healthStore.GetQuarantinedNodes();
             }
             finally
             {
@@ -641,42 +698,6 @@ namespace ScyllaDB.Alternator
             try
             {
                 return this.healthStore.GetDownNodes();
-            }
-            finally
-            {
-                this.ExitLiveNodesReadLock(lockTaken);
-            }
-        }
-
-        protected internal virtual IReadOnlyList<Uri> GetAffinityActiveNodesInternal()
-        {
-            if (!this.requiresAffinityNodes)
-            {
-                return this.GetActiveNodesInternal();
-            }
-
-            var lockTaken = this.EnterLiveNodesReadLock();
-            try
-            {
-                return FilterHealthNodes(this.healthStore.GetActiveNodes(), this.affinityNodes);
-            }
-            finally
-            {
-                this.ExitLiveNodesReadLock(lockTaken);
-            }
-        }
-
-        protected internal virtual IReadOnlyList<Uri> GetAffinityQuarantinedNodesInternal()
-        {
-            if (!this.requiresAffinityNodes)
-            {
-                return this.GetQuarantinedNodesInternal();
-            }
-
-            var lockTaken = this.EnterLiveNodesReadLock();
-            try
-            {
-                return FilterHealthNodes(this.healthStore.GetQuarantinedNodes(), this.affinityNodes);
             }
             finally
             {
@@ -849,6 +870,42 @@ namespace ScyllaDB.Alternator
             return RackScope.Of(dc, rackName, DatacenterScope.Of(dc, ClusterScope.Create()));
         }
 
+        private IReadOnlyList<Uri> GetAffinityActiveNodesInternal()
+        {
+            if (!this.requiresAffinityNodes)
+            {
+                return this.GetActiveNodesInternal();
+            }
+
+            var lockTaken = this.EnterLiveNodesReadLock();
+            try
+            {
+                return FilterHealthNodes(this.healthStore.GetActiveNodes(), this.affinityNodes);
+            }
+            finally
+            {
+                this.ExitLiveNodesReadLock(lockTaken);
+            }
+        }
+
+        private IReadOnlyList<Uri> GetAffinityQuarantinedNodesInternal()
+        {
+            if (!this.requiresAffinityNodes)
+            {
+                return this.GetQuarantinedNodesInternal();
+            }
+
+            var lockTaken = this.EnterLiveNodesReadLock();
+            try
+            {
+                return FilterHealthNodes(this.healthStore.GetQuarantinedNodes(), this.affinityNodes);
+            }
+            finally
+            {
+                this.ExitLiveNodesReadLock(lockTaken);
+            }
+        }
+
         private bool ActivateAffinityNodes()
         {
             this.liveNodesLock.EnterWriteLock();
@@ -934,11 +991,11 @@ namespace ScyllaDB.Alternator
 
         private Uri SelectNextUri()
         {
-            var activeNodes = this.GetActiveNodesInternal();
+            var activeNodes = this.GetOrdinaryActiveNodes();
             if (activeNodes.Count == 0)
             {
                 this.ProbeDownNodesOnce(CancellationToken.None, ordinaryOnly: true);
-                activeNodes = this.GetActiveNodesInternal();
+                activeNodes = this.GetOrdinaryActiveNodes();
             }
 
             var quarantinedNode = this.SelectQuarantinedNode(activeNodes.Count == 0);
@@ -1269,7 +1326,7 @@ namespace ScyllaDB.Alternator
 
         private Uri? SelectQuarantinedNode(bool activeNodesEmpty)
         {
-            var quarantinedNodes = this.GetQuarantinedNodesInternal();
+            var quarantinedNodes = this.GetOrdinaryQuarantinedNodes();
             if (quarantinedNodes.Count == 0)
             {
                 return null;
