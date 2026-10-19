@@ -790,12 +790,57 @@ namespace ScyllaDB.Alternator
             Assert.That(planNodes, Is.EqualTo(SortUris(quarantinedNodes)));
         }
 
-        [TestCase(false)]
-        [TestCase(true)]
-        public void QueryPlanHealthAccessorCanReadLiveNodesTest(bool useInternalGetter)
+        [TestCase(NodeHealthState.Active)]
+        [TestCase(NodeHealthState.Quarantined)]
+        [TestCase(NodeHealthState.Down)]
+        public void AffinityPlansRespectCustomHealthGettersTest(NodeHealthState state)
+        {
+            var nodes = Uris("allowed", "excluded");
+            var allowedNodes = state == NodeHealthState.Down ? Array.Empty<Uri>() : new[] { nodes[0] };
+            var activeNodes = state == NodeHealthState.Active ? allowedNodes : Array.Empty<Uri>();
+            var quarantinedNodes = state == NodeHealthState.Quarantined ? allowedNodes : Array.Empty<Uri>();
+            var affinity = BatchWriteAffinityConfig(PkInfo("orders", "id"));
+            var config = AlternatorConfig.builder()
+                .withSeedHosts(nodes.Select(node => node.Host))
+                .withScheme("http")
+                .withPort(8043)
+                .withRoutingScope(RackScope.of("dc1", "rack1", ClusterScope.create()))
+                .withKeyRouteAffinity(affinity)
+                .build();
+            var liveNodes = new HealthSplitLiveNodes(config, activeNodes, quarantinedNodes);
+            var interceptor = new AffinityQueryPlanInterceptor(affinity, liveNodes);
+            var singleRequest = new PutItemRequest
+            {
+                TableName = "orders",
+                Item = ItemWithId("order-1", "payload"),
+            };
+            var batchRequest = BatchWrite(Table("orders", Put(ItemWithId("order-1", "payload"))));
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(liveNodes.GetActiveNodes(), Is.EqualTo(activeNodes));
+                Assert.That(liveNodes.GetQuarantinedNodes(), Is.EqualTo(quarantinedNodes));
+                Assert.That(new LazyQueryPlan(liveNodes, 42L).ToList(), Is.EqualTo(allowedNodes));
+                Assert.That(new LazyQueryPlan(liveNodes, nodes.AsEnumerable().Reverse()).ToList(), Is.EqualTo(allowedNodes));
+                Assert.That(LazyQueryPlan.SortedAffinityNodes(liveNodes), Is.EqualTo(allowedNodes));
+                Assert.That(LazyQueryPlan.PreferredNodeForHash(liveNodes, 42L), Is.EqualTo(allowedNodes.FirstOrDefault()));
+                Assert.That(
+                    interceptor.GetOrCreateQueryPlan(singleRequest, new Dictionary<string, object>()).ToList(),
+                    Is.EqualTo(allowedNodes));
+                Assert.That(
+                    interceptor.GetOrCreateQueryPlan(batchRequest, new Dictionary<string, object>()).ToList(),
+                    Is.EqualTo(allowedNodes));
+            });
+        }
+
+        [TestCase(false, false)]
+        [TestCase(true, false)]
+        [TestCase(false, true)]
+        [TestCase(true, true)]
+        public void QueryPlanHealthAccessorCanReadLiveNodesTest(bool useInternalGetter, bool rackScoped)
         {
             var nodes = Uris("node2", "node1");
-            var liveNodes = new HealthAccessorReadingLiveNodes(nodes, useInternalGetter);
+            var liveNodes = new HealthAccessorReadingLiveNodes(nodes, useInternalGetter, rackScoped);
 
             Assert.That(new LazyQueryPlan(liveNodes, 42L).ToList(), Is.EquivalentTo(nodes));
             Assert.That(LazyQueryPlan.SortedAffinityNodes(liveNodes), Is.EqualTo(SortUris(nodes)));
@@ -1155,8 +1200,14 @@ namespace ScyllaDB.Alternator
         {
             private readonly bool useInternalGetter;
 
-            internal HealthAccessorReadingLiveNodes(IEnumerable<Uri> nodes, bool useInternalGetter)
-                : base(nodes.ToList(), "http", 8043, string.Empty, string.Empty)
+            internal HealthAccessorReadingLiveNodes(IEnumerable<Uri> nodes, bool useInternalGetter, bool rackScoped)
+                : base(AlternatorConfig.builder()
+                    .withSeedHosts(nodes.Select(node => node.Host))
+                    .withScheme("http")
+                    .withPort(8043)
+                    .withRoutingScope(rackScoped ? RackScope.of("dc1", "rack1", ClusterScope.create()) : ClusterScope.create())
+                    .withKeyRouteAffinity(rackScoped ? KeyRouteAffinity.ANY_WRITE : KeyRouteAffinity.NONE)
+                    .build())
             {
                 this.useInternalGetter = useInternalGetter;
             }
@@ -1179,6 +1230,16 @@ namespace ScyllaDB.Alternator
 
             internal HealthSplitLiveNodes(IEnumerable<Uri> activeNodes, IEnumerable<Uri> quarantinedNodes)
                 : base(BuildSeedNodes(activeNodes, quarantinedNodes), "http", 8043, string.Empty, string.Empty)
+            {
+                this.activeNodes = activeNodes.ToList().AsReadOnly();
+                this.quarantinedNodes = quarantinedNodes.ToList().AsReadOnly();
+            }
+
+            internal HealthSplitLiveNodes(
+                AlternatorConfig config,
+                IEnumerable<Uri> activeNodes,
+                IEnumerable<Uri> quarantinedNodes)
+                : base(config)
             {
                 this.activeNodes = activeNodes.ToList().AsReadOnly();
                 this.quarantinedNodes = quarantinedNodes.ToList().AsReadOnly();

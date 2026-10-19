@@ -880,7 +880,7 @@ namespace ScyllaDB.Alternator
             var lockTaken = this.EnterLiveNodesReadLock();
             try
             {
-                return FilterHealthNodes(this.healthStore.GetActiveNodes(), this.affinityNodes);
+                return FilterHealthNodes(this.GetActiveNodesInternal(), this.affinityNodes);
             }
             finally
             {
@@ -898,7 +898,7 @@ namespace ScyllaDB.Alternator
             var lockTaken = this.EnterLiveNodesReadLock();
             try
             {
-                return FilterHealthNodes(this.healthStore.GetQuarantinedNodes(), this.affinityNodes);
+                return FilterHealthNodes(this.GetQuarantinedNodesInternal(), this.affinityNodes);
             }
             finally
             {
