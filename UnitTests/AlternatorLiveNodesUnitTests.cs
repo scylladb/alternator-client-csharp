@@ -695,6 +695,52 @@ namespace ScyllaDB.Alternator
             }
         }
 
+        [TestCase(false)]
+        [TestCase(true)]
+        public void AffinityDoesNotRepeatFailedScopesWithinRefreshAndRetriesNextRefreshTest(bool ordinaryDiscoveryFails)
+        {
+            var failingHosts = new HashSet<string>();
+            if (ordinaryDiscoveryFails)
+            {
+                failingHosts.Add("seed.example.com");
+            }
+
+            var failingQueries = new HashSet<string> { "?dc=dc1", string.Empty };
+            var handler = new DiscoveryHttpMessageHandler(
+                new Dictionary<string, string> { ["seed.example.com"] = "[\"recovered.example.com\"]" },
+                failingHosts,
+                failingQueries);
+            using var pollingHttpClient = new HttpClient(handler);
+            var config = AlternatorConfig.builder()
+                .withSeedHost("seed.example.com")
+                .withScheme("http")
+                .withPort(8000)
+                .withRoutingScope(RackScope.of("dc1", "rack1", DatacenterScope.of("dc1", ClusterScope.create())))
+                .withKeyRouteAffinity(KeyRouteAffinity.ANY_WRITE)
+                .build();
+            var liveNodes = new AlternatorLiveNodes(config, pollingHttpClient);
+
+            InvokeUpdateLiveNodes(liveNodes);
+
+            Assert.That(
+                handler.RequestedUris.Select(uri => uri.Query),
+                Is.EqualTo(new[] { "?dc=dc1&rack=rack1", "?dc=dc1", string.Empty }));
+            Assert.That(
+                liveNodes.GetLiveNodes().Select(node => node.Host),
+                Is.EqualTo(new[] { ordinaryDiscoveryFails ? "seed.example.com" : "recovered.example.com" }));
+
+            failingHosts.Clear();
+            failingQueries.Clear();
+            InvokeUpdateLiveNodes(liveNodes);
+
+            Assert.That(
+                handler.RequestedUris.Skip(3).Select(uri => uri.Query),
+                Is.EqualTo(new[] { "?dc=dc1&rack=rack1", "?dc=dc1" }));
+            Assert.That(
+                LazyQueryPlan.sortedAffinityNodes(liveNodes).Select(node => node.Host),
+                Is.EqualTo(new[] { "recovered.example.com" }));
+        }
+
         [Test]
         public void AffinityOnlyDownNodeIsProbedAndRecoversTest()
         {
@@ -1409,13 +1455,16 @@ namespace ScyllaDB.Alternator
         {
             private readonly IReadOnlyDictionary<string, string> responsesByHost;
             private readonly ISet<string> failingHosts;
+            private readonly ISet<string> failingQueries;
 
             internal DiscoveryHttpMessageHandler(
                 IReadOnlyDictionary<string, string> responsesByHost,
-                ISet<string>? failingHosts = null)
+                ISet<string>? failingHosts = null,
+                ISet<string>? failingQueries = null)
             {
                 this.responsesByHost = responsesByHost;
                 this.failingHosts = failingHosts ?? new HashSet<string>();
+                this.failingQueries = failingQueries ?? new HashSet<string>();
             }
 
             internal List<Uri> RequestedUris { get; } = new List<Uri>();
@@ -1424,7 +1473,7 @@ namespace ScyllaDB.Alternator
             {
                 var uri = request.RequestUri ?? throw new InvalidOperationException("Request URI was not set.");
                 this.RequestedUris.Add(uri);
-                if (this.failingHosts.Contains(uri.Host))
+                if (this.failingHosts.Contains(uri.Host) || this.failingQueries.Contains(uri.Query))
                 {
                     throw new HttpRequestException("simulated discovery failure for " + uri.Host);
                 }

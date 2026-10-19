@@ -1036,8 +1036,12 @@ namespace ScyllaDB.Alternator
             {
                 try
                 {
+                    var key = (scope.GetType(), scope.LocalNodesQuery);
+
+                    // Retain a failed attempt so affinity does not repeat it within this refresh.
+                    discovered[key] = new List<Uri>();
                     var nodes = this.GetNodesForScope(scope);
-                    discovered[(scope.GetType(), scope.LocalNodesQuery)] = nodes;
+                    discovered[key] = nodes;
                     if (nodes.Count != 0)
                     {
                         this.SetLiveNodes(nodes);
@@ -1086,6 +1090,7 @@ namespace ScyllaDB.Alternator
                     var key = (scope.GetType(), scope.LocalNodesQuery);
                     if (!discovered.TryGetValue(key, out var nodes))
                     {
+                        discovered[key] = new List<Uri>();
                         nodes = this.GetNodesForScope(scope);
                         discovered[key] = nodes;
                     }
