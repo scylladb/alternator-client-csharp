@@ -278,14 +278,14 @@ namespace ScyllaDB.Alternator
 
         public IReadOnlyList<Uri> GetLiveNodes()
         {
-            this.liveNodesLock.EnterReadLock();
+            var lockTaken = this.EnterLiveNodesReadLock();
             try
             {
                 return this.liveNodes.ToList().AsReadOnly();
             }
             finally
             {
-                this.liveNodesLock.ExitReadLock();
+                this.ExitLiveNodesReadLock(lockTaken);
             }
         }
 
@@ -527,15 +527,13 @@ namespace ScyllaDB.Alternator
 
         internal LazyQueryPlan CreateQueryPlan(long seed)
         {
-            var nodes = this.CaptureAffinityQueryPlanNodes();
-            return nodes.PrimaryNodes.Count == 0
-                ? this.CreateQueryPlan()
-                : new LazyQueryPlan(nodes.PrimaryNodes, nodes.FallbackNodes, seed);
+            var nodes = this.CaptureQueryPlanNodes();
+            return new LazyQueryPlan(nodes.PrimaryNodes, nodes.FallbackNodes, seed);
         }
 
         internal LazyQueryPlan CreateQueryPlan(IEnumerable<Uri> preferredNodes)
         {
-            var nodes = this.CaptureAffinityQueryPlanNodes();
+            var nodes = this.CaptureQueryPlanNodes(allowQuarantinedPrimary: false);
             return new LazyQueryPlan(nodes.PrimaryNodes, nodes.FallbackNodes, preferredNodes);
         }
 
@@ -576,16 +574,38 @@ namespace ScyllaDB.Alternator
             }
         }
 
+        internal (IReadOnlyList<Uri> PrimaryNodes, IReadOnlyList<Uri> FallbackNodes) CaptureQueryPlanNodes(
+            bool allowQuarantinedPrimary = true)
+        {
+            var lockTaken = this.EnterLiveNodesReadLock();
+            try
+            {
+                var nodes = this.CaptureAffinityQueryPlanNodes(allowQuarantinedPrimary);
+                if (nodes.PrimaryNodes.Count != 0 || !this.requiresAffinityNodes)
+                {
+                    return nodes;
+                }
+
+                return (
+                    this.GetActiveNodesInternal().ToList().AsReadOnly(),
+                    this.GetQuarantinedNodesInternal().ToList().AsReadOnly());
+            }
+            finally
+            {
+                this.ExitLiveNodesReadLock(lockTaken);
+            }
+        }
+
         protected internal virtual IReadOnlyList<Uri> GetLiveNodesInternal()
         {
-            this.liveNodesLock.EnterReadLock();
+            var lockTaken = this.EnterLiveNodesReadLock();
             try
             {
                 return this.liveNodes;
             }
             finally
             {
-                this.liveNodesLock.ExitReadLock();
+                this.ExitLiveNodesReadLock(lockTaken);
             }
         }
 

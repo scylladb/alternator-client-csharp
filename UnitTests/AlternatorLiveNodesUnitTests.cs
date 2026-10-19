@@ -885,6 +885,139 @@ namespace ScyllaDB.Alternator
                 Is.EqualTo(new[] { "127.0.0.1" }));
         }
 
+        [TestCase("mixed")]
+        [TestCase("quarantined")]
+        [TestCase("empty")]
+        public void SingleAffinityOrdinaryFallbackKeepsSeededSnapshotAcrossRefreshTest(string ordinaryHealth)
+        {
+            var refreshed = false;
+            using var server = new LocalNodesServer(
+                4,
+                request => request.Query == "dc=dc1" ? "[\"127.0.0.5\"]"
+                    : refreshed ? "[\"127.0.0.6\"]" : "[\"127.0.0.2\",\"127.0.0.3\",\"127.0.0.4\"]");
+            var affinity = KeyRouteAffinityConfig.builder()
+                .withType(KeyRouteAffinity.ANY_WRITE).withPkInfo("users", "id").build();
+            var liveNodes = CreateRackScopedLiveNodes(server.Port, "rack1", affinity);
+            InvokeUpdateLiveNodes(liveNodes);
+            liveNodes.ReportNodeResult(new Uri($"http://127.0.0.5:{server.Port}"), NodeHealthObservation.ConnectionFailure);
+            var ordinaryNodes = liveNodes.GetLiveNodes();
+            foreach (var node in ordinaryNodes)
+            {
+                if (ordinaryHealth != "mixed" || node.Host == "127.0.0.4")
+                {
+                    liveNodes.ReportNodeResult(node, NodeHealthObservation.ConnectionFailure);
+                    if (ordinaryHealth != "empty")
+                    {
+                        liveNodes.ReportNodeResult(node, NodeHealthObservation.Success);
+                    }
+                }
+            }
+
+            var partitionKey = new AttributeValue { S = "same-partition" };
+            var seed = AttributeValueHasher.Hash(partitionKey);
+            var expected = ordinaryHealth switch
+            {
+                "mixed" => new LazyQueryPlan(ordinaryNodes.Take(2), seed).Concat(ordinaryNodes.Skip(2)).ToList(),
+                "quarantined" => new LazyQueryPlan(ordinaryNodes, seed).ToList(),
+                _ => new List<Uri>(),
+            };
+            var interceptor = new AffinityQueryPlanInterceptor(affinity, liveNodes);
+            var request = new PutItemRequest
+            {
+                TableName = "users",
+                Item = new Dictionary<string, AttributeValue> { ["id"] = partitionKey },
+            };
+            var context = new Dictionary<string, object>();
+            var plan = interceptor.GetOrCreateQueryPlan(request, context);
+            var observed = new List<Uri>();
+            if (plan.HasNext)
+            {
+                observed.Add(plan.Next());
+            }
+
+            refreshed = true;
+            InvokeUpdateLiveNodes(liveNodes);
+            server.WaitForRequests();
+            observed.AddRange(plan);
+
+            Assert.That(observed, Is.EqualTo(expected));
+            Assert.That(plan.HasNext, Is.False);
+            Assert.That(interceptor.GetOrCreateQueryPlan(request, context), Is.SameAs(plan));
+            Assert.That(
+                interceptor.GetOrCreateQueryPlan(request, new Dictionary<string, object>()).Select(node => node.Host),
+                Is.EqualTo(new[] { "127.0.0.6" }));
+        }
+
+        [Test]
+        public void BatchAffinityOrdinaryFallbackKeepsVotesAndSnapshotAcrossRefreshTest()
+        {
+            var refreshed = false;
+            using var server = new LocalNodesServer(
+                4,
+                request => request.Query == "dc=dc1" ? "[\"127.0.0.5\"]"
+                    : refreshed ? "[\"127.0.0.6\"]" : "[\"127.0.0.2\",\"127.0.0.3\",\"127.0.0.4\"]");
+            var affinity = KeyRouteAffinityConfig.builder()
+                .withType(KeyRouteAffinity.ANY_WRITE).withPkInfo("users", "id").build();
+            var liveNodes = CreateRackScopedLiveNodes(server.Port, "rack1", affinity);
+            InvokeUpdateLiveNodes(liveNodes);
+            liveNodes.ReportNodeResult(new Uri($"http://127.0.0.5:{server.Port}"), NodeHealthObservation.ConnectionFailure);
+            var ordinaryNodes = liveNodes.GetLiveNodes();
+            var quarantined = ordinaryNodes.Last();
+            liveNodes.ReportNodeResult(quarantined, NodeHealthObservation.ConnectionFailure);
+            liveNodes.ReportNodeResult(quarantined, NodeHealthObservation.Success);
+            var partitionKey = new AttributeValue { S = "same-partition" };
+            var activeNodes = ordinaryNodes.Take(2).ToList();
+            var preferred = new LazyQueryPlan(activeNodes, AttributeValueHasher.Hash(partitionKey)).Next();
+            var expected = new[] { preferred }.Concat(activeNodes.Where(node => node != preferred)).Append(quarantined).ToList();
+            var request = new BatchWriteItemRequest
+            {
+                RequestItems = new Dictionary<string, List<WriteRequest>>
+                {
+                    ["users"] = new List<WriteRequest>
+                    {
+                        new WriteRequest
+                        {
+                            PutRequest = new PutRequest
+                            {
+                                Item = new Dictionary<string, AttributeValue> { ["id"] = partitionKey },
+                            },
+                        },
+                    },
+                },
+            };
+            var interceptor = new AffinityQueryPlanInterceptor(affinity, liveNodes);
+            var plan = interceptor.GetOrCreateQueryPlan(request, new Dictionary<string, object>());
+            var observed = new List<Uri> { plan.Next() };
+
+            refreshed = true;
+            InvokeUpdateLiveNodes(liveNodes);
+            server.WaitForRequests();
+            observed.AddRange(plan);
+
+            Assert.That(observed, Is.EqualTo(expected));
+            Assert.That(plan.HasNext, Is.False);
+            Assert.That(
+                interceptor.GetOrCreateQueryPlan(request, new Dictionary<string, object>()).Select(node => node.Host),
+                Is.EqualTo(new[] { "127.0.0.6" }));
+        }
+
+        [Test]
+        public void PublicSeededAndPreferredPlansUseOrdinaryFallbackWhenAffinityIsDownTest()
+        {
+            using var server = new LocalNodesServer(
+                2,
+                request => request.Query == "dc=dc1" ? "[\"127.0.0.5\"]" : "[\"127.0.0.2\"]");
+            var affinity = KeyRouteAffinityConfig.builder().withType(KeyRouteAffinity.ANY_WRITE).build();
+            var liveNodes = CreateRackScopedLiveNodes(server.Port, "rack1", affinity);
+            InvokeUpdateLiveNodes(liveNodes);
+            server.WaitForRequests();
+            liveNodes.ReportNodeResult(new Uri($"http://127.0.0.5:{server.Port}"), NodeHealthObservation.ConnectionFailure);
+            var ordinaryNodes = liveNodes.GetLiveNodes();
+
+            Assert.That(new LazyQueryPlan(liveNodes, 42L).ToList(), Is.EqualTo(ordinaryNodes));
+            Assert.That(new LazyQueryPlan(liveNodes, ordinaryNodes).ToList(), Is.EqualTo(ordinaryNodes));
+        }
+
         [Test]
         public void OrdinaryRecoverySkipsAffinityOnlyDownNodesAndExplicitProbeRecoversThemTest()
         {

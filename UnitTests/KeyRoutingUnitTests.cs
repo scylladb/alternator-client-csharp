@@ -779,7 +779,7 @@ namespace ScyllaDB.Alternator
         }
 
         [Test]
-        public void LazyQueryPlanPreferredNodesApplyToQuarantinedPrimaryNodesTest()
+        public void LazyQueryPlanPreferredNodesDoNotReorderQuarantinedFallbackTest()
         {
             var quarantinedNodes = Uris("node2", "node1");
             var liveNodes = new HealthSplitLiveNodes(Array.Empty<Uri>(), quarantinedNodes);
@@ -787,7 +787,18 @@ namespace ScyllaDB.Alternator
 
             var planNodes = DrainQueryPlanUris(plan, quarantinedNodes.Count);
 
-            Assert.That(planNodes, Is.EqualTo(new[] { quarantinedNodes[0], quarantinedNodes[1] }));
+            Assert.That(planNodes, Is.EqualTo(SortUris(quarantinedNodes)));
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void QueryPlanHealthAccessorCanReadLiveNodesTest(bool useInternalGetter)
+        {
+            var nodes = Uris("node2", "node1");
+            var liveNodes = new HealthAccessorReadingLiveNodes(nodes, useInternalGetter);
+
+            Assert.That(new LazyQueryPlan(liveNodes, 42L).ToList(), Is.EquivalentTo(nodes));
+            Assert.That(LazyQueryPlan.SortedAffinityNodes(liveNodes), Is.EqualTo(SortUris(nodes)));
         }
 
         [Test]
@@ -1137,6 +1148,27 @@ namespace ScyllaDB.Alternator
             {
                 cancellation.Token.ThrowIfCancellationRequested();
                 await Task.Delay(20, cancellation.Token);
+            }
+        }
+
+        private sealed class HealthAccessorReadingLiveNodes : AlternatorLiveNodes
+        {
+            private readonly bool useInternalGetter;
+
+            internal HealthAccessorReadingLiveNodes(IEnumerable<Uri> nodes, bool useInternalGetter)
+                : base(nodes.ToList(), "http", 8043, string.Empty, string.Empty)
+            {
+                this.useInternalGetter = useInternalGetter;
+            }
+
+            protected override IReadOnlyList<Uri> GetActiveNodesInternal()
+            {
+                return this.useInternalGetter ? this.GetLiveNodesInternal() : this.GetLiveNodes();
+            }
+
+            protected override IReadOnlyList<Uri> GetQuarantinedNodesInternal()
+            {
+                return Array.Empty<Uri>();
             }
         }
 

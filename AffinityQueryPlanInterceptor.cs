@@ -150,7 +150,7 @@ namespace ScyllaDB.Alternator
                 return null;
             }
 
-            var queryPlanNodes = this.LiveNodes.CaptureAffinityQueryPlanNodes(allowQuarantinedPrimary: false);
+            var queryPlanNodes = this.LiveNodes.CaptureQueryPlanNodes(allowQuarantinedPrimary: false);
             if (queryPlanNodes.PrimaryNodes.Count == 0)
             {
                 return null;

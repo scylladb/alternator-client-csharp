@@ -33,7 +33,10 @@ namespace ScyllaDB.Alternator.KeyRouting
         }
 
         public LazyQueryPlan(IEnumerable<Uri> nodes, long seed)
-            : this(nodes, Array.Empty<Uri>(), seed)
+            : this(
+                nodes ?? throw new ArgumentException("nodes cannot be null", nameof(nodes)),
+                Array.Empty<Uri>(),
+                seed)
         {
         }
 
@@ -49,7 +52,7 @@ namespace ScyllaDB.Alternator.KeyRouting
                 throw new ArgumentException("liveNodes cannot be null", nameof(liveNodes));
             }
 
-            var nodes = liveNodes.CaptureAffinityQueryPlanNodes();
+            var nodes = liveNodes.CaptureQueryPlanNodes();
             this.random = new GoRand(seed);
             this.fixedNodes = new List<Uri>(nodes.PrimaryNodes);
             this.fixedFallbackNodes = new List<Uri>(nodes.FallbackNodes);
@@ -67,7 +70,7 @@ namespace ScyllaDB.Alternator.KeyRouting
                 throw new ArgumentException("preferredNodes cannot be null", nameof(preferredNodes));
             }
 
-            var nodes = liveNodes.CaptureAffinityQueryPlanNodes();
+            var nodes = liveNodes.CaptureQueryPlanNodes(allowQuarantinedPrimary: false);
             this.fixedNodes = new List<Uri>(nodes.PrimaryNodes);
             this.fixedFallbackNodes = new List<Uri>(nodes.FallbackNodes);
             this.preferredNodes = new List<Uri>(preferredNodes);
