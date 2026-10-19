@@ -425,6 +425,12 @@ namespace ScyllaDB.Alternator
             {
                 var interceptor = new AffinityQueryPlanInterceptor(affinity, liveNodes);
                 server.WaitForRequests();
+                Assert.That(
+                    SpinWait.SpinUntil(
+                        () => LazyQueryPlan.sortedAffinityNodes(liveNodes).Select(node => node.Host)
+                            .SequenceEqual(new[] { "127.0.0.2", "127.0.0.3", "127.0.0.4" }),
+                        TimeSpan.FromSeconds(5)),
+                    Is.True);
 
                 var basicPlan = new BasicQueryPlanInterceptor(liveNodes)
                     .GetOrCreateQueryPlan(new ListTablesRequest(), new Dictionary<string, object>())
@@ -660,13 +666,15 @@ namespace ScyllaDB.Alternator
             rack2.start().Wait(TimeSpan.FromSeconds(5));
             try
             {
-                var rack1Interceptor = new AffinityQueryPlanInterceptor(affinity, rack1);
-                var rack2Interceptor = new AffinityQueryPlanInterceptor(affinity, rack2);
                 Assert.That(
                     SpinWait.SpinUntil(
-                        () => rack1Handler.HasRackAndDatacenterRequests && rack2Handler.HasRackAndDatacenterRequests,
+                        () => rack1Handler.HasRackAndDatacenterRequests && rack2Handler.HasRackAndDatacenterRequests
+                            && LazyQueryPlan.sortedAffinityNodes(rack1).Select(node => node.Host).SequenceEqual(clusterNodes)
+                            && LazyQueryPlan.sortedAffinityNodes(rack2).Select(node => node.Host).SequenceEqual(clusterNodes),
                         TimeSpan.FromSeconds(5)),
                     Is.True);
+                var rack1Interceptor = new AffinityQueryPlanInterceptor(affinity, rack1);
+                var rack2Interceptor = new AffinityQueryPlanInterceptor(affinity, rack2);
 
                 var request = new PutItemRequest
                 {
@@ -741,8 +749,181 @@ namespace ScyllaDB.Alternator
                 Is.EqualTo(new[] { "recovered.example.com" }));
         }
 
+        [TestCase(false, false)]
+        [TestCase(true, false)]
+        [TestCase(false, true)]
+        public void SuccessfulCustomScopeDoesNotReadUnusedFallbackTest(bool configuredAffinity, bool attachInterceptor)
+        {
+            var handler = new DiscoveryHttpMessageHandler(
+                new Dictionary<string, string> { ["seed.example.com"] = "[\"node.example.com\"]" });
+            using var client = new HttpClient(handler);
+            var scope = new TrackingRoutingScope();
+            var builder = AlternatorConfig.builder()
+                .withSeedHost("seed.example.com")
+                .withScheme("http")
+                .withPort(8043)
+                .withRoutingScope(scope);
+            var affinity = KeyRouteAffinityConfig.builder().withType(KeyRouteAffinity.ANY_WRITE).build();
+            if (configuredAffinity)
+            {
+                builder.withKeyRouteAffinity(affinity);
+            }
+
+            var liveNodes = new AlternatorLiveNodes(builder.build(), client);
+            if (attachInterceptor)
+            {
+                _ = new AffinityQueryPlanInterceptor(affinity, liveNodes);
+            }
+
+            InvokeUpdateLiveNodes(liveNodes);
+
+            Assert.That(scope.FallbackReads, Is.Zero);
+            Assert.That(liveNodes.GetLiveNodes().Select(node => node.Host), Is.EqualTo(new[] { "node.example.com" }));
+            Assert.That(LazyQueryPlan.sortedAffinityNodes(liveNodes), Is.EqualTo(liveNodes.GetLiveNodes()));
+            Assert.That(handler.RequestedUris.Select(uri => uri.Query), Is.EqualTo(new[] { "?dc=custom" }));
+        }
+
         [Test]
-        public void AffinityOnlyDownNodeIsProbedAndRecoversTest()
+        public void SuccessfulDatacenterAffinityDoesNotReadUnusedCustomFallbackTest()
+        {
+            var handler = new DiscoveryHttpMessageHandler(
+                new Dictionary<string, string> { ["seed.example.com"] = "[\"node.example.com\"]" });
+            using var client = new HttpClient(handler);
+            var unusedScope = new TrackingRoutingScope();
+            var liveNodes = new AlternatorLiveNodes(
+                AlternatorConfig.builder()
+                    .withSeedHost("seed.example.com")
+                    .withScheme("http")
+                    .withPort(8043)
+                    .withRoutingScope(RackScope.of("dc1", "rack1", unusedScope))
+                    .withKeyRouteAffinity(KeyRouteAffinity.ANY_WRITE)
+                    .build(),
+                client);
+
+            InvokeUpdateLiveNodes(liveNodes);
+
+            Assert.That(unusedScope.FallbackReads, Is.Zero);
+            Assert.That(LazyQueryPlan.sortedAffinityNodes(liveNodes).Select(node => node.Host), Is.EqualTo(new[] { "node.example.com" }));
+            Assert.That(handler.RequestedUris.Select(uri => uri.Query), Is.EqualTo(new[] { "?dc=dc1&rack=rack1", "?dc=dc1" }));
+        }
+
+        [TestCase("[]")]
+        [TestCase(LocalNodesServer.Http500)]
+        public void CustomScopeFallbackToRackEnablesDatacenterAffinityTest(string customResponse)
+        {
+            using var server = new LocalNodesServer(
+                3,
+                request => request.Query switch
+                {
+                    "dc=custom" => customResponse,
+                    "dc=dc1&rack=rack1" => "[\"127.0.0.2\"]",
+                    "dc=dc1" => "[\"127.0.0.2\",\"127.0.0.3\"]",
+                    _ => throw new InvalidOperationException("Unexpected discovery query: " + request.Query),
+                });
+            var scope = new TrackingRoutingScope(RackScope.of("dc1", "rack1", ClusterScope.create()));
+            var liveNodes = new AlternatorLiveNodes(AlternatorConfig.builder()
+                .withSeedHost("127.0.0.1")
+                .withScheme("http")
+                .withPort(server.Port)
+                .withRoutingScope(scope)
+                .withKeyRouteAffinity(KeyRouteAffinity.ANY_WRITE)
+                .build());
+
+            InvokeUpdateLiveNodes(liveNodes);
+            server.WaitForRequests();
+
+            Assert.That(scope.FallbackReads, Is.GreaterThan(0));
+            Assert.That(liveNodes.GetLiveNodes().Select(node => node.Host), Is.EqualTo(new[] { "127.0.0.2" }));
+            Assert.That(
+                LazyQueryPlan.sortedAffinityNodes(liveNodes).Select(node => node.Host),
+                Is.EqualTo(new[] { "127.0.0.2", "127.0.0.3" }));
+            Assert.That(
+                server.Requests.Select(request => request.Query),
+                Is.EqualTo(new[] { "dc=custom", "dc=dc1&rack=rack1", "dc=dc1" }));
+        }
+
+        [Test]
+        public void EmptyAffinityMembershipFallsBackToReinjectedSeedForSingleAndBatchWritesTest()
+        {
+            var failDiscovery = false;
+            using var server = new LocalNodesServer(
+                5,
+                request => failDiscovery ? "invalid JSON" : request.Query == "dc=dc1"
+                    ? "[\"127.0.0.2\",\"127.0.0.3\"]"
+                    : "[\"127.0.0.2\"]");
+            var affinity = KeyRouteAffinityConfig.builder()
+                .withType(KeyRouteAffinity.ANY_WRITE)
+                .withPkInfo("users", "id")
+                .build();
+            var liveNodes = CreateRackScopedLiveNodes(server.Port, "rack1", affinity);
+            InvokeUpdateLiveNodes(liveNodes);
+            foreach (var node in LazyQueryPlan.sortedAffinityNodes(liveNodes))
+            {
+                liveNodes.ReportNodeResult(node, NodeHealthObservation.ConnectionFailure);
+            }
+
+            failDiscovery = true;
+            InvokeUpdateLiveNodes(liveNodes);
+            server.WaitForRequests();
+            var interceptor = new AffinityQueryPlanInterceptor(affinity, liveNodes);
+            var item = new Dictionary<string, AttributeValue> { ["id"] = new AttributeValue { S = "same-partition" } };
+            var single = new PutItemRequest { TableName = "users", Item = item };
+            var batch = new BatchWriteItemRequest
+            {
+                RequestItems = new Dictionary<string, List<WriteRequest>>
+                {
+                    ["users"] = new List<WriteRequest> { new WriteRequest { PutRequest = new PutRequest { Item = item } } },
+                },
+            };
+
+            Assert.That(LazyQueryPlan.sortedAffinityNodes(liveNodes), Is.Empty);
+            Assert.That(
+                interceptor.GetOrCreateQueryPlan(single, new Dictionary<string, object>()).Select(node => node.Host),
+                Is.EqualTo(new[] { "127.0.0.1" }));
+            Assert.That(
+                interceptor.GetOrCreateQueryPlan(batch, new Dictionary<string, object>()).Select(node => node.Host),
+                Is.EqualTo(new[] { "127.0.0.1" }));
+        }
+
+        [Test]
+        public void OrdinaryRecoverySkipsAffinityOnlyDownNodesAndExplicitProbeRecoversThemTest()
+        {
+            var localNode = new Uri("http://local.example.com:8043");
+            var remoteNode = new Uri("http://remote.example.com:8043");
+            var handler = new ScopeAwareDiscoveryHttpMessageHandler(localNode.Host, new[] { localNode.Host, remoteNode.Host });
+            using var client = new HttpClient(handler);
+            var config = AlternatorConfig.builder()
+                .withSeedHost(localNode.Host)
+                .withScheme("http")
+                .withPort(localNode.Port)
+                .withRoutingScope(RackScope.of("dc1", "rack1", ClusterScope.create()))
+                .withKeyRouteAffinity(KeyRouteAffinity.ANY_WRITE)
+                .withNodeHealth(NodeHealthStoreConfig.builder().withQuarantineSuccessThreshold(1).build())
+                .build();
+            var liveNodes = new AlternatorLiveNodes(config, client);
+            InvokeUpdateLiveNodes(liveNodes);
+            liveNodes.ReportNodeResult(localNode, NodeHealthObservation.ConnectionFailure);
+            liveNodes.ReportNodeResult(remoteNode, NodeHealthObservation.ConnectionFailure);
+            var method = typeof(AlternatorLiveNodes).GetMethod(
+                "SelectNextUri",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+            Assert.That(method, Is.Not.Null);
+
+            Assert.That(method!.Invoke(liveNodes, Array.Empty<object>()), Is.EqualTo(localNode));
+
+            Assert.That(handler.RequestedUris.Skip(2).Select(uri => uri.Host), Is.EqualTo(new[] { localNode.Host }));
+            Assert.That(liveNodes.GetNodeStatus(localNode)?.State, Is.EqualTo(NodeHealthState.Active));
+            Assert.That(liveNodes.GetDownNodes(), Is.EqualTo(new[] { remoteNode }));
+            Assert.That(liveNodes.ProbeDownNodesAsync().GetAwaiter().GetResult(), Is.EqualTo(new[] { remoteNode }));
+            Assert.That(liveNodes.GetNodeStatus(remoteNode)?.State, Is.EqualTo(NodeHealthState.Active));
+            Assert.That(handler.RequestedUris.Last().Host, Is.EqualTo(remoteNode.Host));
+            Assert.That(
+                LazyQueryPlan.sortedAffinityNodes(liveNodes),
+                Is.EqualTo(new[] { localNode, remoteNode }));
+        }
+
+        [Test]
+        public void AffinityOnlyDownNodeIsProbedIntoQuarantineTest()
         {
             using var server = new LocalNodesServer(
                 3,
@@ -1526,6 +1707,33 @@ namespace ScyllaDB.Alternator
             }
         }
 
+        private sealed class TrackingRoutingScope : RoutingScope
+        {
+            private readonly RoutingScope? fallback;
+
+            internal TrackingRoutingScope(RoutingScope? fallback = null)
+            {
+                this.fallback = fallback;
+            }
+
+            public string Name => "Custom";
+
+            public string Description => "Custom scope";
+
+            public RoutingScope? Fallback
+            {
+                get
+                {
+                    this.FallbackReads++;
+                    return this.fallback ?? throw new InvalidOperationException("Unused fallback was read.");
+                }
+            }
+
+            public string LocalNodesQuery => "dc=custom";
+
+            internal int FallbackReads { get; private set; }
+        }
+
         private sealed class ScopeAwareDiscoveryHttpMessageHandler : HttpMessageHandler
         {
             private readonly string rackNode;
@@ -1542,6 +1750,8 @@ namespace ScyllaDB.Alternator
             internal bool HasRackAndDatacenterRequests =>
                 this.requestedUris.Any(uri => uri.Query.Contains("&rack="))
                 && this.requestedUris.Any(uri => uri.Query == "?dc=dc1");
+
+            internal IReadOnlyList<Uri> RequestedUris => this.requestedUris.ToArray();
 
             protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
             {

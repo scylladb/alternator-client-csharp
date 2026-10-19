@@ -825,11 +825,8 @@ namespace ScyllaDB.Alternator
 
             var queryPlan = InvokeTryCreateBatchWriteAffinityQueryPlan(interceptor, request);
 
-            Assert.That(queryPlan, Is.Not.Null);
+            Assert.That(queryPlan, Is.Null);
             Assert.That(liveNodes.ActiveNodesReadCount, Is.EqualTo(1));
-            Assert.That(
-                DrainQueryPlanUris(queryPlan!, quarantinedNodes.Count),
-                Is.EquivalentTo(quarantinedNodes));
         }
 
         [Test]
