@@ -235,6 +235,8 @@ test-infrastructure:
 
 .PHONY: test-integration
 test-integration: ccm-install
+	# Initialize CCM's default directory before parallel commands can race to create it.
+	"$(SCYLLA_CCM_PATH)" list > /dev/null
 	mkdir -p "$(MAKEFILE_PATH)/IntegrationTests/TestResults"
 	for stale_dir in "$(MAKEFILE_PATH)"/IntegrationTests/TestResults/ccm-runtime.*; do
 		if [[ -d "$$stale_dir" ]] && [[ -f "$$stale_dir/OWNER_PID" ]]; then
