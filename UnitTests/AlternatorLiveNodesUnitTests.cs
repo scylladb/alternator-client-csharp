@@ -1807,8 +1807,11 @@ namespace ScyllaDB.Alternator
             Assert.That(LazyQueryPlan.preferredNodeForHash(liveNodes, 42L), Is.EqualTo(expected));
         }
 
-        [Test]
-        public void OrdinarySelectionStaysLocalWhenAffinityActivatesDuringHealthReadTest()
+        [TestCase("ordinary")]
+        [TestCase("sorted")]
+        [TestCase("seeded")]
+        [TestCase("preferred")]
+        public void HealthReadActivationPreservesRoutingAndCaptureTest(string selection)
         {
             var localNode = new Uri("http://local.example.com:8043");
             var remoteNode = new Uri("http://remote.example.com:8043");
@@ -1821,16 +1824,38 @@ namespace ScyllaDB.Alternator
                 .withRoutingScope(RackScope.of("dc1", "rack1", ClusterScope.create()))
                 .build();
             var liveNodes = new AffinityActivatingLiveNodes(config, client);
+            var shutdownCompleted = false;
+            Exception? cleanupException = null;
             try
             {
-                Assert.That(liveNodes.NextAsUri(), Is.EqualTo(localNode));
+                IEnumerable<Uri> plan = selection switch
+                {
+                    "ordinary" => new[] { liveNodes.NextAsUri() },
+                    "sorted" => LazyQueryPlan.SortedAffinityNodes(liveNodes),
+                    "seeded" => new LazyQueryPlan(liveNodes, 42L),
+                    _ => new LazyQueryPlan(liveNodes, new[] { localNode }),
+                };
+                var selectedNodes = plan.ToArray();
+                Assert.That(
+                    selectedNodes,
+                    Is.EquivalentTo(selection == "ordinary" ? new[] { localNode } : new[] { localNode, remoteNode }));
                 Assert.That(liveNodes.GetLiveNodes(), Is.EqualTo(new[] { localNode }));
                 Assert.That(liveNodes.GetActiveNodes(), Is.EqualTo(new[] { localNode, remoteNode }));
             }
             finally
             {
-                Assert.That(liveNodes.ShutdownAndWait(), Is.True);
+                try
+                {
+                    shutdownCompleted = liveNodes.ShutdownAndWait();
+                }
+                catch (Exception exception)
+                {
+                    cleanupException = exception;
+                }
             }
+
+            Assert.That(cleanupException, Is.Null);
+            Assert.That(shutdownCompleted, Is.True);
         }
 
         [Test]
@@ -1849,6 +1874,8 @@ namespace ScyllaDB.Alternator
                 .withNodeHealth(NodeHealthStoreConfig.builder().withQuarantineSuccessThreshold(1).build())
                 .build();
             var liveNodes = new AlternatorLiveNodes(config, client);
+            var shutdownCompleted = false;
+            Exception? cleanupException = null;
             try
             {
                 InvokeUpdateLiveNodes(liveNodes);
@@ -1878,8 +1905,18 @@ namespace ScyllaDB.Alternator
             }
             finally
             {
-                Assert.That(liveNodes.ShutdownAndWait(), Is.True);
+                try
+                {
+                    shutdownCompleted = liveNodes.ShutdownAndWait();
+                }
+                catch (Exception exception)
+                {
+                    cleanupException = exception;
+                }
             }
+
+            Assert.That(cleanupException, Is.Null);
+            Assert.That(shutdownCompleted, Is.True);
         }
 
         [Test]
@@ -2422,6 +2459,10 @@ namespace ScyllaDB.Alternator
                 .build();
             var liveNodes = new AlternatorLiveNodes(config, pollingHttpClient);
             var runTask = run ? Task.Run(() => liveNodes.run()) : liveNodes.start();
+            var shutdownCompleted = false;
+            var runCompleted = false;
+            Exception? shutdownException = null;
+            Exception? joinException = null;
             try
             {
                 Assert.That(SpinWait.SpinUntil(() => liveNodes.isRunning(), TimeSpan.FromSeconds(5)), Is.True);
@@ -2440,9 +2481,32 @@ namespace ScyllaDB.Alternator
             }
             finally
             {
-                Assert.That(liveNodes.shutdownAndWait(), Is.True);
-                Assert.That(runTask.Wait(TimeSpan.FromSeconds(5)), Is.True);
+                try
+                {
+                    shutdownCompleted = liveNodes.shutdownAndWait();
+                }
+                catch (Exception exception)
+                {
+                    shutdownException = exception;
+                }
+
+                try
+                {
+                    runCompleted = runTask.Wait(TimeSpan.FromSeconds(5));
+                }
+                catch (Exception exception)
+                {
+                    joinException = exception;
+                }
             }
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(shutdownException, Is.Null);
+                Assert.That(joinException, Is.Null);
+                Assert.That(shutdownCompleted, Is.True);
+                Assert.That(runCompleted, Is.True);
+            });
         }
 
         [Test]
@@ -2548,10 +2612,14 @@ namespace ScyllaDB.Alternator
             var lockField = typeof(AlternatorLiveNodes).GetField("liveNodesLock", bindingFlags);
             var liveNodesField = typeof(AlternatorLiveNodes).GetField("liveNodes", bindingFlags);
             var affinityNodesField = typeof(AlternatorLiveNodes).GetField("affinityNodes", bindingFlags);
+            var liveMembershipField = typeof(AlternatorLiveNodes).GetField("liveNodeMembership", bindingFlags);
+            var affinityMembershipField = typeof(AlternatorLiveNodes).GetField("affinityNodeMembership", bindingFlags);
             var healthStoreField = typeof(AlternatorLiveNodes).GetField("healthStore", bindingFlags);
             Assert.That(lockField, Is.Not.Null);
             Assert.That(liveNodesField, Is.Not.Null);
             Assert.That(affinityNodesField, Is.Not.Null);
+            Assert.That(liveMembershipField, Is.Not.Null);
+            Assert.That(affinityMembershipField, Is.Not.Null);
             Assert.That(healthStoreField, Is.Not.Null);
 
             var topologyLock = lockField!.GetValue(liveNodes) as ReaderWriterLockSlim;
@@ -2574,6 +2642,8 @@ namespace ScyllaDB.Alternator
                 var publishedNodes = new List<Uri> { newNode };
                 liveNodesField!.SetValue(liveNodes, publishedNodes);
                 affinityNodesField!.SetValue(liveNodes, new List<Uri>(publishedNodes));
+                liveMembershipField!.SetValue(liveNodes, new HashSet<Uri>(publishedNodes));
+                affinityMembershipField!.SetValue(liveNodes, new HashSet<Uri>(publishedNodes));
                 setKnownNodes!.Invoke(healthStore, new object[] { publishedNodes });
             }
             finally
