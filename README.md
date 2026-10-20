@@ -475,7 +475,8 @@ retries. Other DCs remain excluded while the preferred DC is usable. Ordinary
 requests retain their configured scope. Existing startup, refresh timing, health
 handling and failure fallbacks remain available, including temporary rack or seed
 membership before successful discovery or during failures. Disabled affinity and
-matching ordinary discovery need no additional view.
+chains with no rack keep ordinary discovery. Matching ordinary outcomes avoid
+additional discovery requests.
 
 ## AlternatorLiveNodes
 

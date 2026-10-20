@@ -305,8 +305,9 @@ namespace ScyllaDB.Alternator.KeyRouting
             else
             {
                 var nodes = this.liveNodes!.CaptureQueryPlanNodes(
-                    allowQuarantinedPrimary: this.preferredNodes == null,
-                    retainQuarantinedAffinity: this.preferredNodes != null);
+                    this.preferredNodes == null
+                        ? AlternatorLiveNodes.QueryPlanCaptureMode.Seeded
+                        : AlternatorLiveNodes.QueryPlanCaptureMode.Preferred);
                 this.remaining = new List<Uri>(nodes.PrimaryNodes);
                 this.fallbackRemaining = new List<Uri>(nodes.FallbackNodes);
             }

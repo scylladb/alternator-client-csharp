@@ -156,6 +156,13 @@ namespace ScyllaDB.Alternator
             }
         }
 
+        internal enum QueryPlanCaptureMode
+        {
+            Seeded,
+            Batch,
+            Preferred,
+        }
+
         public Task Start(CancellationToken cancellationToken = default)
         {
             if (this.started)
@@ -534,7 +541,29 @@ namespace ScyllaDB.Alternator
 
         internal void EnableAffinityNodes()
         {
-            this.ActivateAffinityNodes();
+            this.liveNodesLock.EnterWriteLock();
+            try
+            {
+                if (this.affinityScopes != null)
+                {
+                    return;
+                }
+
+                var resolved = new AffinityScopeChain(this.config.RoutingScope);
+                this.affinityScopes = resolved;
+                if (!resolved.HasRack)
+                {
+                    return;
+                }
+
+                this.affinityNodes = new List<Uri>(this.liveNodes);
+                this.healthStore.SetKnownNodes(this.liveNodes.Concat(this.affinityNodes));
+                this.requiresAffinityNodes = true;
+            }
+            finally
+            {
+                this.liveNodesLock.ExitWriteLock();
+            }
         }
 
         internal IReadOnlyList<Uri> GetOrdinaryActiveNodes()
@@ -566,6 +595,8 @@ namespace ScyllaDB.Alternator
             if (!this.requiresAffinityNodes)
             {
                 var nodes = this.GetQuarantinedNodesInternal();
+
+                // Activation may race the unlocked health snapshot.
                 if (!this.requiresAffinityNodes)
                 {
                     return nodes;
@@ -602,15 +633,14 @@ namespace ScyllaDB.Alternator
         }
 
         internal (IReadOnlyList<Uri> PrimaryNodes, IReadOnlyList<Uri> FallbackNodes) CaptureQueryPlanNodes(
-            bool allowQuarantinedPrimary = true,
-            bool retainQuarantinedAffinity = false)
+            QueryPlanCaptureMode mode = QueryPlanCaptureMode.Seeded)
         {
             var lockTaken = this.EnterLiveNodesReadLock();
             try
             {
-                var nodes = this.CaptureAffinityQueryPlanNodes(allowQuarantinedPrimary);
+                var nodes = this.CaptureAffinityQueryPlanNodes(mode == QueryPlanCaptureMode.Seeded);
                 if (nodes.PrimaryNodes.Count != 0 || !this.requiresAffinityNodes
-                    || (retainQuarantinedAffinity && nodes.FallbackNodes.Count != 0))
+                    || (mode == QueryPlanCaptureMode.Preferred && nodes.FallbackNodes.Count != 0))
                 {
                     return nodes;
                 }
@@ -791,6 +821,11 @@ namespace ScyllaDB.Alternator
             return healthNodes.Where(allowed.Contains).ToList().AsReadOnly();
         }
 
+        private static (bool AggregateSeeds, string Query) GetDiscoveryOperationKey(RoutingScope scope, string query)
+        {
+            return (scope is ClusterScope, query);
+        }
+
         private static bool IsBuiltInScope(RoutingScope scope)
         {
             return scope is RackScope || scope is DatacenterScope || scope is ClusterScope;
@@ -869,35 +904,7 @@ namespace ScyllaDB.Alternator
             }
         }
 
-        private bool ActivateAffinityNodes()
-        {
-            this.liveNodesLock.EnterWriteLock();
-            try
-            {
-                if (this.affinityScopes != null)
-                {
-                    return false;
-                }
-
-                var resolved = new AffinityScopeChain(this.config.RoutingScope);
-                this.affinityScopes = resolved;
-                if (!resolved.HasRack)
-                {
-                    return false;
-                }
-
-                this.affinityNodes = new List<Uri>(this.liveNodes);
-                this.healthStore.SetKnownNodes(this.liveNodes.Concat(this.affinityNodes));
-                this.requiresAffinityNodes = true;
-                return true;
-            }
-            finally
-            {
-                this.liveNodesLock.ExitWriteLock();
-            }
-        }
-
-        private void ActivateResolvedAffinityNodes()
+        private void UseSeparateAffinityView()
         {
             if (this.requiresAffinityNodes)
             {
@@ -1124,14 +1131,14 @@ namespace ScyllaDB.Alternator
                 if (chain != null && scope is RackScope)
                 {
                     chain.ObserveRack();
-                    this.ActivateResolvedAffinityNodes();
+                    this.UseSeparateAffinityView();
                 }
 
                 var observation = observations.Add(scope);
                 try
                 {
                     var query = observation.Query;
-                    var key = (AggregateSeeds: scope is ClusterScope, Query: query);
+                    var key = GetDiscoveryOperationKey(scope, query);
 
                     // Retain a failed attempt so affinity does not repeat it within this refresh.
                     discovered[key] = new List<Uri>();
@@ -1189,11 +1196,6 @@ namespace ScyllaDB.Alternator
                 for (var index = 0; ; index++)
                 {
                     var occurrence = chain.Get(index, observations);
-                    if (chain.HasRack)
-                    {
-                        this.ActivateResolvedAffinityNodes();
-                    }
-
                     if (!occurrence.HasValue)
                     {
                         break;
@@ -1205,7 +1207,7 @@ namespace ScyllaDB.Alternator
                         var query = IsBuiltInScope(scope)
                             ? scope.LocalNodesQuery
                             : observations.Get(scope, occurrence.Value.Number).Query;
-                        var key = (AggregateSeeds: scope is ClusterScope, Query: query);
+                        var key = GetDiscoveryOperationKey(scope, query);
                         if (!discovered.TryGetValue(key, out var nodes))
                         {
                             discovered[key] = new List<Uri>();
@@ -1234,10 +1236,7 @@ namespace ScyllaDB.Alternator
             }
             finally
             {
-                if (this.requiresAffinityNodes)
-                {
-                    this.CompleteAffinityRefresh(refreshedNodes);
-                }
+                this.CompleteAffinityRefresh(refreshedNodes);
             }
         }
 
@@ -1558,7 +1557,7 @@ namespace ScyllaDB.Alternator
                         this.hasRack = true;
                     }
 
-                    if (this.operations.Add((derived is ClusterScope, derived.LocalNodesQuery)))
+                    if (this.operations.Add(GetDiscoveryOperationKey(derived, derived.LocalNodesQuery)))
                     {
                         this.scopes.Add((derived, 0));
                     }
