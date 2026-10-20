@@ -425,6 +425,7 @@ namespace ScyllaDB.Alternator
             try
             {
                 var interceptor = new AffinityQueryPlanInterceptor(affinity, liveNodes);
+                liveNodes.nextAsURI();
                 server.WaitForRequests();
                 Assert.That(
                     SpinWait.SpinUntil(
@@ -640,7 +641,7 @@ namespace ScyllaDB.Alternator
         }
 
         [Test]
-        public void ConfiguredRackAffinityStartsDatacenterDiscoveryWithoutRequestActivityTest()
+        public void ConfiguredRackAffinityDiscoversDatacenterOnRequestActivityTest()
         {
             var datacenterNodes = new[]
             {
@@ -667,6 +668,8 @@ namespace ScyllaDB.Alternator
             rack2.start().Wait(TimeSpan.FromSeconds(5));
             try
             {
+                rack1.nextAsURI();
+                rack2.nextAsURI();
                 Assert.That(
                     SpinWait.SpinUntil(
                         () => rack1Handler.HasRackAndDatacenterRequests && rack2Handler.HasRackAndDatacenterRequests
@@ -898,7 +901,7 @@ namespace ScyllaDB.Alternator
             var scope = RackScope.of("dc1", "rack1", first);
             using var server = new LocalNodesServer(
                 matchesBuiltIn ? 6 : 8,
-                request => request.Query.Contains("&rack=") ? "[\"127.0.0.2\"]"
+                request => request.Query.Contains("&rack=") && (!matchesBuiltIn || phase == 0) ? "[\"127.0.0.2\"]"
                     : request.Query == "dc=other" ? "[\"127.0.0.3\"]" : "[]");
             var liveNodes = new AlternatorLiveNodes(AlternatorConfig.builder()
                 .withSeedHost("127.0.0.1")
@@ -922,9 +925,9 @@ namespace ScyllaDB.Alternator
                 Assert.That(initialSecondFallbackReads, Is.EqualTo(1));
                 Assert.That(firstQueryReads, Is.EqualTo(2));
                 Assert.That(secondQueryReads, Is.EqualTo(2));
-                Assert.That(first.FallbackReads, Is.EqualTo(1));
+                Assert.That(first.FallbackReads, Is.EqualTo(matchesBuiltIn ? 4 : 1));
                 Assert.That(second.FallbackReads, Is.EqualTo(1));
-                Assert.That(liveNodes.GetLiveNodes().Select(node => node.Host), Is.EqualTo(new[] { "127.0.0.2" }));
+                Assert.That(liveNodes.GetLiveNodes().Select(node => node.Host), Is.EqualTo(new[] { matchesBuiltIn ? "127.0.0.3" : "127.0.0.2" }));
                 Assert.That(LazyQueryPlan.sortedAffinityNodes(liveNodes).Select(node => node.Host), Is.EqualTo(new[] { "127.0.0.3" }));
                 Assert.That(server.Requests.Select(request => request.Query), Is.EqualTo(matchesBuiltIn
                     ? new[] { "dc=dc1&rack=rack1", "dc=dc1", string.Empty, "dc=dc1&rack=rack1", "dc=dc1", "dc=other" }
@@ -1016,23 +1019,31 @@ namespace ScyllaDB.Alternator
             });
         }
 
-        [Test]
-        public void CustomDiscoveryQueryIsEvaluatedOncePerRefreshTest()
+        [TestCase(false)]
+        [TestCase(true)]
+        public void CustomDiscoveryQueryIsEvaluatedOncePerRefreshTest(bool affinityEnabled)
         {
             var queryReads = 0;
-            var scope = new TrackingRoutingScope(query: () => ++queryReads % 2 == 1 ? "dc=A" : "dc=B");
+            var scope = new TrackingRoutingScope(
+                RackScope.of("dc1", "rack1", null),
+                () => ++queryReads % 2 == 1 ? "dc=A" : "dc=B");
             using var server = new LocalNodesServer(
                 2,
                 request => request.Query == "dc=A" ? "[\"127.0.0.2\"]" : "[\"127.0.0.3\"]");
-            var liveNodes = new AlternatorLiveNodes(AlternatorConfig.builder()
+            using var pollingHttpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(1) };
+            var liveNodes = new AlternatorLiveNodes(
+                AlternatorConfig.builder()
                 .withSeedHost("127.0.0.1")
                 .withScheme("http")
                 .withPort(server.Port)
                 .withRoutingScope(scope)
-                .build());
+                .withKeyRouteAffinity(affinityEnabled ? KeyRouteAffinity.ANY_WRITE : KeyRouteAffinity.NONE)
+                .build(),
+                pollingHttpClient);
 
             InvokeUpdateLiveNodes(liveNodes);
             var firstNodes = liveNodes.GetLiveNodes();
+            var firstAffinityNodes = LazyQueryPlan.SortedAffinityNodes(liveNodes);
             InvokeUpdateLiveNodes(liveNodes);
             server.WaitForRequests();
 
@@ -1042,7 +1053,9 @@ namespace ScyllaDB.Alternator
                 Assert.That(server.Requests.Select(request => request.Query), Is.EqualTo(new[] { "dc=A", "dc=B" }));
                 Assert.That(firstNodes.Select(node => node.Host), Is.EqualTo(new[] { "127.0.0.2" }));
                 Assert.That(liveNodes.GetLiveNodes().Select(node => node.Host), Is.EqualTo(new[] { "127.0.0.3" }));
-                Assert.That(scope.FallbackReads, Is.Zero);
+                Assert.That(firstAffinityNodes, Is.EqualTo(firstNodes));
+                Assert.That(LazyQueryPlan.SortedAffinityNodes(liveNodes), Is.EqualTo(liveNodes.GetLiveNodes()));
+                Assert.That(scope.FallbackReads, Is.EqualTo(affinityEnabled ? 1 : 0));
             });
         }
 
@@ -1286,7 +1299,7 @@ namespace ScyllaDB.Alternator
                 },
             };
 
-            Assert.That(LazyQueryPlan.sortedAffinityNodes(liveNodes), Is.Empty);
+            Assert.That(LazyQueryPlan.sortedAffinityNodes(liveNodes).Select(node => node.Host), Is.EqualTo(new[] { "127.0.0.1" }));
             Assert.That(
                 interceptor.GetOrCreateQueryPlan(single, new Dictionary<string, object>()).Select(node => node.Host),
                 Is.EqualTo(new[] { "127.0.0.1" }));
@@ -1456,6 +1469,11 @@ namespace ScyllaDB.Alternator
                 System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
             Assert.That(method, Is.Not.Null);
             Assert.That(method!.Invoke(liveNodes, new object[] { -1L }), Is.EqualTo(ordinaryNodes.Last()));
+            Assert.That(LazyQueryPlan.SortedAffinityNodes(liveNodes), Is.EqualTo(ordinaryNodes));
+            Assert.That(LazyQueryPlan.sortedAffinityNodes(liveNodes), Is.EqualTo(ordinaryNodes));
+            var expected = new LazyQueryPlan(liveNodes, 42L).First();
+            Assert.That(LazyQueryPlan.PreferredNodeForHash(liveNodes, 42L), Is.EqualTo(expected));
+            Assert.That(LazyQueryPlan.preferredNodeForHash(liveNodes, 42L), Is.EqualTo(expected));
         }
 
         [Test]
@@ -1876,6 +1894,74 @@ namespace ScyllaDB.Alternator
             Assert.That(hosts, Is.EquivalentTo(new[] { "127.0.0.2", "127.0.0.3" }));
         }
 
+        [TestCase(false, false)]
+        [TestCase(true, false)]
+        [TestCase(false, true)]
+        [TestCase(true, true)]
+        public void PublicAffinityPlanCapturesNodesOnFirstUseAndKeepsThemAcrossRefreshTest(bool preferred, bool affinityEnabled)
+        {
+            var refreshed = false;
+            using var server = new LocalNodesServer(
+                affinityEnabled ? 4 : 2,
+                _ => refreshed ? "[\"127.0.0.4\"]" : "[\"127.0.0.2\",\"127.0.0.3\"]");
+            var config = AlternatorConfig.builder()
+                .withSeedHost("127.0.0.1")
+                .withScheme("http")
+                .withPort(server.Port)
+                .withRoutingScope(affinityEnabled ? RackScope.of("dc1", "rack1", null) : ClusterScope.create())
+                .withKeyRouteAffinity(affinityEnabled ? KeyRouteAffinity.ANY_WRITE : KeyRouteAffinity.NONE)
+                .build();
+            var liveNodes = new AlternatorLiveNodes(config);
+            var preferredNode = new Uri($"http://127.0.0.3:{server.Port}");
+            var plan = preferred ? new LazyQueryPlan(liveNodes, new[] { preferredNode }) : new LazyQueryPlan(liveNodes, 42L);
+
+            InvokeUpdateLiveNodes(liveNodes);
+            var expectedPlan = preferred
+                ? new LazyQueryPlan(liveNodes, new[] { preferredNode }).ToList()
+                : new LazyQueryPlan(liveNodes, 42L).ToList();
+            var first = plan.Next();
+            refreshed = true;
+            InvokeUpdateLiveNodes(liveNodes);
+            server.WaitForRequests();
+            var captured = new[] { first }.Concat(plan).ToList();
+
+            Assert.That(captured, Is.EqualTo(expectedPlan));
+            Assert.That(captured.Select(node => node.Host), Is.EquivalentTo(new[] { "127.0.0.2", "127.0.0.3" }));
+            if (preferred)
+            {
+                Assert.That(first, Is.EqualTo(preferredNode));
+            }
+
+            Assert.That(plan.HasNext, Is.False);
+            Assert.That(new LazyQueryPlan(liveNodes, 42L).Select(node => node.Host), Is.EqualTo(new[] { "127.0.0.4" }));
+        }
+
+        [Test]
+        public void PublicPreferredPlanKeepsCanonicalDatacenterQuarantineFallbackTest()
+        {
+            using var server = new LocalNodesServer(
+                2,
+                request => request.Query == "dc=dc1" ? "[\"127.0.0.3\",\"127.0.0.2\"]" : "[\"127.0.0.4\"]");
+            var affinity = KeyRouteAffinityConfig.builder().withType(KeyRouteAffinity.ANY_WRITE).build();
+            var liveNodes = CreateRackScopedLiveNodes(server.Port, "rack1", affinity);
+            var preferredNode = new Uri($"http://127.0.0.3:{server.Port}");
+            var plan = new LazyQueryPlan(liveNodes, new[] { preferredNode });
+            InvokeUpdateLiveNodes(liveNodes);
+            server.WaitForRequests();
+            foreach (var node in LazyQueryPlan.SortedAffinityNodes(liveNodes))
+            {
+                liveNodes.ReportNodeResult(node, NodeHealthObservation.ConnectionFailure);
+                liveNodes.ReportNodeResult(node, NodeHealthObservation.Success);
+                Assert.That(liveNodes.GetNodeStatus(node)?.State, Is.EqualTo(NodeHealthState.Quarantined));
+            }
+
+            Assert.That(liveNodes.GetLiveNodes().Select(node => node.Host), Is.EqualTo(new[] { "127.0.0.4" }));
+            Assert.That(plan.Select(node => node.Host), Is.EqualTo(new[] { "127.0.0.2", "127.0.0.3" }));
+            Assert.That(
+                new LazyQueryPlan(liveNodes, new[] { preferredNode }).Select(node => node.Host),
+                Is.EqualTo(new[] { "127.0.0.2", "127.0.0.3" }));
+        }
+
         [Test]
         public void UpdateLiveNodesContinuesFallbackAfterNonSuccessResponseTest()
         {
@@ -1984,8 +2070,13 @@ namespace ScyllaDB.Alternator
             Assert.That(handler.SendCount, Is.GreaterThanOrEqualTo(1));
         }
 
-        [Test]
-        public void StartDefersPollingUntilIdleRefreshIntervalTest()
+        [TestCase(false, "cluster")]
+        [TestCase(true, "cluster")]
+        [TestCase(false, "configured")]
+        [TestCase(true, "configured")]
+        [TestCase(false, "late")]
+        [TestCase(true, "late")]
+        public void StartDefersPollingUntilIdleRefreshIntervalTest(bool run, string affinityMode)
         {
             var handler = new TrackingHttpMessageHandler();
             using var pollingHttpClient = new HttpClient(handler);
@@ -1993,20 +2084,34 @@ namespace ScyllaDB.Alternator
                 .withSeedHost("127.0.0.1")
                 .withScheme("http")
                 .withPort(8080)
-                .withRoutingScope(ClusterScope.create())
+                .withRoutingScope(affinityMode == "cluster" ? ClusterScope.create() : RackScope.of("dc1", "rack1", null))
+                .withKeyRouteAffinity(affinityMode == "configured" ? KeyRouteAffinity.ANY_WRITE : KeyRouteAffinity.NONE)
                 .withActiveRefreshIntervalMs(10)
                 .withIdleRefreshIntervalMs(500)
                 .build();
             var liveNodes = new AlternatorLiveNodes(config, pollingHttpClient);
+            var runTask = run ? Task.Run(() => liveNodes.run()) : liveNodes.start();
+            try
+            {
+                Assert.That(SpinWait.SpinUntil(() => liveNodes.isRunning(), TimeSpan.FromSeconds(5)), Is.True);
+                if (affinityMode == "late")
+                {
+                    _ = new AffinityQueryPlanInterceptor(
+                        KeyRouteAffinityConfig.builder().withType(KeyRouteAffinity.ANY_WRITE).build(),
+                        liveNodes);
+                }
 
-            liveNodes.start().Wait(TimeSpan.FromSeconds(5));
-            Thread.Sleep(100);
-            Assert.That(handler.SendCount, Is.EqualTo(0));
-            Assert.That(
-                SpinWait.SpinUntil(() => handler.SendCount == 1, TimeSpan.FromSeconds(5)),
-                Is.True);
-
-            liveNodes.shutdownAndWait();
+                Thread.Sleep(100);
+                Assert.That(handler.SendCount, Is.Zero);
+                Assert.That(
+                    SpinWait.SpinUntil(() => handler.SendCount >= (affinityMode == "cluster" ? 1 : 2), TimeSpan.FromSeconds(5)),
+                    Is.True);
+            }
+            finally
+            {
+                Assert.That(liveNodes.shutdownAndWait(), Is.True);
+                Assert.That(runTask.Wait(TimeSpan.FromSeconds(5)), Is.True);
+            }
         }
 
         [Test]

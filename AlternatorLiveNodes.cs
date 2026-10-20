@@ -167,10 +167,6 @@ namespace ScyllaDB.Alternator
             this.refreshCancellation?.Dispose();
             this.refreshCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             this.started = true;
-            if (this.requiresAffinityNodes)
-            {
-                this.RequestImmediateRefresh();
-            }
 
             this.refreshTask = Task.Run(
                 () =>
@@ -191,11 +187,6 @@ namespace ScyllaDB.Alternator
             this.refreshCancellation?.Dispose();
             this.refreshCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             this.started = true;
-            if (this.requiresAffinityNodes)
-            {
-                this.RequestImmediateRefresh();
-            }
-
             this.UpdateCycle(this.refreshCancellation.Token);
         }
 
@@ -536,12 +527,6 @@ namespace ScyllaDB.Alternator
             return new LazyQueryPlan(nodes.PrimaryNodes, nodes.FallbackNodes, seed);
         }
 
-        internal LazyQueryPlan CreateQueryPlan(IEnumerable<Uri> preferredNodes)
-        {
-            var nodes = this.CaptureQueryPlanNodes(allowQuarantinedPrimary: false);
-            return new LazyQueryPlan(nodes.PrimaryNodes, nodes.FallbackNodes, preferredNodes);
-        }
-
         internal LazyQueryPlan CreateQueryPlan()
         {
             return new LazyQueryPlan(this);
@@ -549,15 +534,7 @@ namespace ScyllaDB.Alternator
 
         internal void EnableAffinityNodes()
         {
-            if (!this.ActivateAffinityNodes())
-            {
-                return;
-            }
-
-            if (this.started)
-            {
-                this.RequestImmediateRefresh();
-            }
+            this.ActivateAffinityNodes();
         }
 
         internal IReadOnlyList<Uri> GetOrdinaryActiveNodes()
@@ -625,13 +602,15 @@ namespace ScyllaDB.Alternator
         }
 
         internal (IReadOnlyList<Uri> PrimaryNodes, IReadOnlyList<Uri> FallbackNodes) CaptureQueryPlanNodes(
-            bool allowQuarantinedPrimary = true)
+            bool allowQuarantinedPrimary = true,
+            bool retainQuarantinedAffinity = false)
         {
             var lockTaken = this.EnterLiveNodesReadLock();
             try
             {
                 var nodes = this.CaptureAffinityQueryPlanNodes(allowQuarantinedPrimary);
-                if (nodes.PrimaryNodes.Count != 0 || !this.requiresAffinityNodes)
+                if (nodes.PrimaryNodes.Count != 0 || !this.requiresAffinityNodes
+                    || (retainQuarantinedAffinity && nodes.FallbackNodes.Count != 0))
                 {
                     return nodes;
                 }
@@ -810,6 +789,17 @@ namespace ScyllaDB.Alternator
         {
             var allowed = new HashSet<Uri>(allowedNodes);
             return healthNodes.Where(allowed.Contains).ToList().AsReadOnly();
+        }
+
+        private static string CaptureScopeQuery(RoutingScope scope, Dictionary<RoutingScope, Lazy<string>> queries)
+        {
+            if (!queries.TryGetValue(scope, out var query))
+            {
+                query = new Lazy<string>(() => scope.LocalNodesQuery);
+                queries.Add(scope, query);
+            }
+
+            return query.Value;
         }
 
         private static (IReadOnlyList<RoutingScope> Scopes, bool HasRack) CreateAffinityScopes(RoutingScope scope)
@@ -1085,12 +1075,6 @@ namespace ScyllaDB.Alternator
             }
         }
 
-        private void RequestImmediateRefresh()
-        {
-            Interlocked.Exchange(ref this.updateRequested, 1);
-            this.SignalUpdateWaiters();
-        }
-
         private bool WaitForRefreshSignalOrIdleInterval(CancellationToken cancellationToken)
         {
             using var registration = cancellationToken.Register(this.SignalUpdateWaiters);
@@ -1159,11 +1143,12 @@ namespace ScyllaDB.Alternator
             var scope = this.config.RoutingScope;
             Exception? lastException = null;
             var discovered = new Dictionary<(bool AggregateSeeds, string Query), List<Uri>>();
+            var queries = new Dictionary<RoutingScope, Lazy<string>>(ReferenceEqualityComparer.Instance);
             while (scope != null)
             {
                 try
                 {
-                    var query = scope.LocalNodesQuery;
+                    var query = CaptureScopeQuery(scope, queries);
                     var key = (AggregateSeeds: scope is ClusterScope, Query: query);
 
                     // Retain a failed attempt so affinity does not repeat it within this refresh.
@@ -1173,7 +1158,7 @@ namespace ScyllaDB.Alternator
                     if (nodes.Count != 0)
                     {
                         this.SetLiveNodes(nodes);
-                        this.UpdateAffinityNodes(discovered);
+                        this.UpdateAffinityNodes(discovered, queries);
                         Logger.Info($"Updated hosts to {this.liveNodes} using {scope.Description}");
                         return;
                     }
@@ -1195,16 +1180,18 @@ namespace ScyllaDB.Alternator
             if (lastException != null)
             {
                 this.SetLiveNodes(this.MergeWithInitialNodes(this.GetLiveNodes().ToList()));
-                this.UpdateAffinityNodes(discovered);
+                this.UpdateAffinityNodes(discovered, queries);
                 Logger.Warn("All nodes unreachable in every routing scope, re-injected seed nodes into live list");
                 return;
             }
 
-            this.UpdateAffinityNodes(discovered);
+            this.UpdateAffinityNodes(discovered, queries);
             Logger.Warn("No nodes found in any routing scope, keeping existing node list");
         }
 
-        private void UpdateAffinityNodes(Dictionary<(bool AggregateSeeds, string Query), List<Uri>> discovered)
+        private void UpdateAffinityNodes(
+            Dictionary<(bool AggregateSeeds, string Query), List<Uri>> discovered,
+            Dictionary<RoutingScope, Lazy<string>> queries)
         {
             if (!this.requiresAffinityNodes)
             {
@@ -1218,7 +1205,7 @@ namespace ScyllaDB.Alternator
                 {
                     try
                     {
-                        var query = scope.LocalNodesQuery;
+                        var query = CaptureScopeQuery(scope, queries);
                         var key = (AggregateSeeds: scope is ClusterScope, Query: query);
                         if (!discovered.TryGetValue(key, out var nodes))
                         {

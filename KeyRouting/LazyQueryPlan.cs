@@ -47,15 +47,8 @@ namespace ScyllaDB.Alternator.KeyRouting
 
         public LazyQueryPlan(AlternatorLiveNodes liveNodes, long seed)
         {
-            if (liveNodes == null)
-            {
-                throw new ArgumentException("liveNodes cannot be null", nameof(liveNodes));
-            }
-
-            var nodes = liveNodes.CaptureQueryPlanNodes();
+            this.liveNodes = liveNodes ?? throw new ArgumentException("liveNodes cannot be null", nameof(liveNodes));
             this.random = new GoRand(seed);
-            this.fixedNodes = new List<Uri>(nodes.PrimaryNodes);
-            this.fixedFallbackNodes = new List<Uri>(nodes.FallbackNodes);
         }
 
         public LazyQueryPlan(AlternatorLiveNodes liveNodes, IEnumerable<Uri> preferredNodes)
@@ -70,9 +63,7 @@ namespace ScyllaDB.Alternator.KeyRouting
                 throw new ArgumentException("preferredNodes cannot be null", nameof(preferredNodes));
             }
 
-            var nodes = liveNodes.CaptureQueryPlanNodes(allowQuarantinedPrimary: false);
-            this.fixedNodes = new List<Uri>(nodes.PrimaryNodes);
-            this.fixedFallbackNodes = new List<Uri>(nodes.FallbackNodes);
+            this.liveNodes = liveNodes;
             this.preferredNodes = new List<Uri>(preferredNodes);
         }
 
@@ -142,7 +133,8 @@ namespace ScyllaDB.Alternator.KeyRouting
                 throw new ArgumentException("liveNodes cannot be null", nameof(liveNodes));
             }
 
-            var nodes = liveNodes.CaptureAffinityQueryPlanNodes().PrimaryNodes.ToList();
+            var snapshot = liveNodes.CaptureQueryPlanNodes();
+            var nodes = (snapshot.PrimaryNodes.Count != 0 ? snapshot.PrimaryNodes : snapshot.FallbackNodes).ToList();
             SortAffinityNodes(nodes);
             return nodes;
         }
@@ -305,8 +297,20 @@ namespace ScyllaDB.Alternator.KeyRouting
                 return;
             }
 
-            this.remaining = new List<Uri>(this.fixedNodes!);
-            this.fallbackRemaining = new List<Uri>(this.fixedFallbackNodes!);
+            if (this.fixedNodes != null)
+            {
+                this.remaining = new List<Uri>(this.fixedNodes);
+                this.fallbackRemaining = new List<Uri>(this.fixedFallbackNodes!);
+            }
+            else
+            {
+                var nodes = this.liveNodes!.CaptureQueryPlanNodes(
+                    allowQuarantinedPrimary: this.preferredNodes == null,
+                    retainQuarantinedAffinity: this.preferredNodes != null);
+                this.remaining = new List<Uri>(nodes.PrimaryNodes);
+                this.fallbackRemaining = new List<Uri>(nodes.FallbackNodes);
+            }
+
             SortAffinityNodes(this.remaining);
             SortAffinityNodes(this.fallbackRemaining);
             if (this.preferredNodes != null)
