@@ -1332,6 +1332,42 @@ namespace ScyllaDB.Alternator
         }
 
         [Test]
+        public void AffinitySuccessLogPreservesOrdinaryCustomDescriptionReadsTest()
+        {
+            var descriptionReads = 0;
+            var queryReads = 0;
+            var custom = new TrackingRoutingScope(
+                query: () =>
+                {
+                    Interlocked.Increment(ref queryReads);
+                    return "custom=selected";
+                },
+                description: () => Interlocked.Increment(ref descriptionReads) <= 2
+                    ? "Custom scope"
+                    : throw new InvalidOperationException("Unused auxiliary description was read."));
+            var handler = new ScopeAwareDiscoveryHttpMessageHandler(uri =>
+                uri.Query == "?custom=selected" ? "[\"custom.example.com\"]" : "[]");
+            using var client = new HttpClient(handler);
+            var liveNodes = CreateCustomScopedLiveNodes(RackScope.Of("dc1", "rack1", custom), client);
+            try
+            {
+                descriptionReads = 0;
+                queryReads = 0;
+                InvokeUpdateLiveNodes(liveNodes);
+
+                Assert.That(descriptionReads, Is.EqualTo(2));
+                Assert.That(queryReads, Is.EqualTo(1));
+                Assert.That(custom.FallbackReads, Is.Zero);
+                Assert.That(liveNodes.GetLiveNodes().Select(node => node.Host), Is.EqualTo(new[] { "custom.example.com" }));
+                Assert.That(LazyQueryPlan.SortedAffinityNodes(liveNodes), Is.EqualTo(liveNodes.GetLiveNodes()));
+            }
+            finally
+            {
+                liveNodes.ShutdownAndWait();
+            }
+        }
+
+        [Test]
         public void AffinityReusesActualOrdinaryFallbackAssignmentWithoutFourthReadTest()
         {
             var rack = RackScope.Of("dc2", "rack2", null);
@@ -2788,17 +2824,23 @@ namespace ScyllaDB.Alternator
             private readonly RoutingScope? fallback;
             private readonly Func<string>? query;
             private readonly Func<RoutingScope?>? fallbackProvider;
+            private readonly Func<string>? description;
 
-            internal TrackingRoutingScope(RoutingScope? fallback = null, Func<string>? query = null, Func<RoutingScope?>? fallbackProvider = null)
+            internal TrackingRoutingScope(
+                RoutingScope? fallback = null,
+                Func<string>? query = null,
+                Func<RoutingScope?>? fallbackProvider = null,
+                Func<string>? description = null)
             {
                 this.fallback = fallback;
                 this.query = query;
                 this.fallbackProvider = fallbackProvider;
+                this.description = description;
             }
 
             public string Name => "Custom";
 
-            public string Description => "Custom scope";
+            public string Description => this.description?.Invoke() ?? "Custom scope";
 
             public RoutingScope? Fallback
             {

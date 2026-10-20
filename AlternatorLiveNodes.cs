@@ -1216,13 +1216,13 @@ namespace ScyllaDB.Alternator
                         if (nodes.Count != 0)
                         {
                             refreshedNodes = new List<Uri>(nodes);
-                            Logger.Info($"Updated key-route affinity hosts to {string.Join(", ", nodes)} using {scope.Description}");
+                            Logger.Info($"Updated key-route affinity hosts to {string.Join(", ", nodes)} using scope {index}");
                             return;
                         }
                     }
                     catch (Exception e)
                     {
-                        Logger.Warn(e, $"Failed to discover key-route affinity nodes for {scope.Description}");
+                        Logger.Warn(e, $"Failed to discover key-route affinity nodes for scope {index}");
                     }
                 }
 
