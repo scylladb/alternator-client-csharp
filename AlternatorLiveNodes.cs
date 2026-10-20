@@ -41,7 +41,7 @@ namespace ScyllaDB.Alternator
         private readonly bool ownsPollingHttpClient;
         private readonly NodeHealthStore healthStore;
         private readonly object updateSignalLock = new object();
-        private volatile bool affinityEnabled;
+        private IReadOnlyList<RoutingScope>? affinityScopes;
         private volatile bool requiresAffinityNodes;
         private List<Uri> liveNodes;
         private List<Uri> affinityNodes;
@@ -137,8 +137,12 @@ namespace ScyllaDB.Alternator
             }
 
             this.affinityNodes = new List<Uri>(this.liveNodes);
-            this.affinityEnabled = config.KeyRouteAffinityConfig?.IsEnabled == true;
-            this.requiresAffinityNodes = this.affinityEnabled && HasRackScope(config.RoutingScope);
+            if (config.KeyRouteAffinityConfig?.IsEnabled == true)
+            {
+                var resolved = CreateAffinityScopes(config.RoutingScope);
+                this.affinityScopes = resolved.Scopes;
+                this.requiresAffinityNodes = resolved.HasRack;
+            }
 
             this.healthStore = new NodeHealthStore(this.config.NodeHealth, this.initialNodes);
 
@@ -545,8 +549,7 @@ namespace ScyllaDB.Alternator
 
         internal void EnableAffinityNodes()
         {
-            this.affinityEnabled = true;
-            if (!HasRackScope(this.config.RoutingScope) || !this.ActivateAffinityNodes())
+            if (!this.ActivateAffinityNodes())
             {
                 return;
             }
@@ -809,33 +812,42 @@ namespace ScyllaDB.Alternator
             return healthNodes.Where(allowed.Contains).ToList().AsReadOnly();
         }
 
-        private static bool HasRackScope(RoutingScope scope)
+        private static (IReadOnlyList<RoutingScope> Scopes, bool HasRack) CreateAffinityScopes(RoutingScope scope)
         {
-            for (RoutingScope? current = scope; current != null; current = current.Fallback)
+            var scopes = new List<RoutingScope>();
+            var operations = new HashSet<(bool AggregateSeeds, string Query)>();
+            var visited = new HashSet<RoutingScope>(ReferenceEqualityComparer.Instance);
+            var hasRack = false;
+            for (RoutingScope? current = scope; current != null && visited.Add(current);)
             {
-                if (current is RackScope)
+                var affinityScope = current;
+                if (current is RackScope rack)
                 {
-                    return true;
+                    affinityScope = DatacenterScope.Of(rack.Datacenter, null);
+                    hasRack = true;
                 }
 
-                // Custom scopes may compute fallbacks lazily; inspect them only when discovery needs them.
-                if (current is not DatacenterScope && current is not ClusterScope)
+                // Custom queries can change between refreshes. Deduplicate their current
+                // operations in the refresh cache, without removing the original scopes.
+                if ((affinityScope is not DatacenterScope && affinityScope is not ClusterScope)
+                    || operations.Add((affinityScope is ClusterScope, affinityScope.LocalNodesQuery)))
                 {
-                    return false;
+                    scopes.Add(affinityScope);
+                }
+
+                try
+                {
+                    current = current.Fallback;
+                }
+                catch (Exception e)
+                {
+                    // An auxiliary scope getter must not introduce a new startup failure.
+                    Logger.Warn(e, "Failed to resolve an affinity fallback; keeping the resolved scopes");
+                    break;
                 }
             }
 
-            return false;
-        }
-
-        private static IEnumerable<RoutingScope> CreateAffinityScopes(RoutingScope scope)
-        {
-            for (RoutingScope? current = scope; current != null; current = current.Fallback)
-            {
-                yield return current is RackScope rack
-                    ? DatacenterScope.Of(rack.Datacenter, null)
-                    : current;
-            }
+            return (scopes.AsReadOnly(), hasRack);
         }
 
         private static AlternatorConfig CreateLegacyConfig(
@@ -916,7 +928,14 @@ namespace ScyllaDB.Alternator
             this.liveNodesLock.EnterWriteLock();
             try
             {
-                if (this.requiresAffinityNodes)
+                if (this.affinityScopes != null)
+                {
+                    return false;
+                }
+
+                var resolved = CreateAffinityScopes(this.config.RoutingScope);
+                this.affinityScopes = resolved.Scopes;
+                if (!resolved.HasRack)
                 {
                     return false;
                 }
@@ -1142,11 +1161,6 @@ namespace ScyllaDB.Alternator
             var discovered = new Dictionary<(bool AggregateSeeds, string Query), List<Uri>>();
             while (scope != null)
             {
-                if (this.affinityEnabled && !this.requiresAffinityNodes && scope is RackScope)
-                {
-                    this.ActivateAffinityNodes();
-                }
-
                 try
                 {
                     var query = scope.LocalNodesQuery;
@@ -1200,7 +1214,7 @@ namespace ScyllaDB.Alternator
             List<Uri>? refreshedNodes = null;
             try
             {
-                foreach (var scope in CreateAffinityScopes(this.config.RoutingScope))
+                foreach (var scope in this.affinityScopes!)
                 {
                     try
                     {

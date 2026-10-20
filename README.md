@@ -453,8 +453,10 @@ AmazonDynamoDBClient client = AlternatorDynamoDBClient.builder()
 
 When key-route affinity is enabled and the configured scope chain contains a rack
 restriction, qualifying writes use an additional affinity view. Its discovery
-chain replaces each rack restriction with its named datacenter and preserves all
-explicit fallbacks in order. For example, `rack(A,r1) → rack(B,r2) → cluster`
+chain is resolved once when affinity is enabled. It replaces each built-in rack
+restriction with its named datacenter and preserves all explicit fallbacks in order.
+Equivalent discovery operations share results within a refresh, including empty
+results; later refreshes retry them. Custom scope queries retain their behavior. For example, `rack(A,r1) → rack(B,r2) → cluster`
 becomes `DC(A) → DC(B) → cluster`; no implicit fallback is added. Named
 datacenters are discovered through `/localnodes?dc=<configured-dc>`.
 

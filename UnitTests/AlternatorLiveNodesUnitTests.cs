@@ -18,6 +18,7 @@ namespace ScyllaDB.Alternator
     using System.Net.Sockets;
     using System.Text;
     using Amazon.DynamoDBv2.Model;
+    using Amazon.Runtime;
     using ScyllaDB.Alternator.KeyRouting;
     using ScyllaDB.Alternator.Routing;
 
@@ -752,12 +753,12 @@ namespace ScyllaDB.Alternator
         [TestCase(false, false)]
         [TestCase(true, false)]
         [TestCase(false, true)]
-        public void SuccessfulCustomScopeDoesNotReadUnusedFallbackTest(bool configuredAffinity, bool attachInterceptor)
+        public void AffinityResolvesCustomFallbackOnlyWhenEnabledTest(bool configuredAffinity, bool attachInterceptor)
         {
             var handler = new DiscoveryHttpMessageHandler(
                 new Dictionary<string, string> { ["seed.example.com"] = "[\"node.example.com\"]" });
             using var client = new HttpClient(handler);
-            var scope = new TrackingRoutingScope();
+            var scope = new TrackingRoutingScope(RackScope.of("dc1", "rack1", null));
             var builder = AlternatorConfig.builder()
                 .withSeedHost("seed.example.com")
                 .withScheme("http")
@@ -777,10 +778,158 @@ namespace ScyllaDB.Alternator
 
             InvokeUpdateLiveNodes(liveNodes);
 
-            Assert.That(scope.FallbackReads, Is.Zero);
+            Assert.That(scope.FallbackReads, Is.EqualTo(configuredAffinity || attachInterceptor ? 1 : 0));
             Assert.That(liveNodes.GetLiveNodes().Select(node => node.Host), Is.EqualTo(new[] { "node.example.com" }));
             Assert.That(LazyQueryPlan.sortedAffinityNodes(liveNodes), Is.EqualTo(liveNodes.GetLiveNodes()));
             Assert.That(handler.RequestedUris.Select(uri => uri.Query), Is.EqualTo(new[] { "?dc=custom" }));
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void AffinityRetryPlanKeepsCapturedDatacenterMembershipAcrossRefreshTest(bool batch)
+        {
+            var refreshed = false;
+            using var server = new LocalNodesServer(
+                4,
+                request => request.Query.Contains("&rack=") ? "[\"127.0.0.2\"]"
+                    : refreshed ? "[\"127.0.0.6\",\"127.0.0.7\"]" : "[\"127.0.0.3\",\"127.0.0.4\",\"127.0.0.5\"]");
+            var affinity = KeyRouteAffinityConfig.builder()
+                .withType(KeyRouteAffinity.ANY_WRITE).withPkInfo("users", "id").build();
+            var liveNodes = CreateRackScopedLiveNodes(server.Port, "rack1", affinity);
+            InvokeUpdateLiveNodes(liveNodes);
+            var item = new Dictionary<string, AttributeValue> { ["id"] = new AttributeValue { S = "same-partition" } };
+            AmazonWebServiceRequest request = batch
+                ? new BatchWriteItemRequest
+                {
+                    RequestItems = new Dictionary<string, List<WriteRequest>>
+                    {
+                        ["users"] = new List<WriteRequest>
+                        {
+                            new WriteRequest { PutRequest = new PutRequest { Item = item } },
+                        },
+                    },
+                }
+                : new PutItemRequest { TableName = "users", Item = item };
+            var interceptor = new AffinityQueryPlanInterceptor(affinity, liveNodes);
+            var context = new Dictionary<string, object>();
+            var plan = interceptor.GetOrCreateQueryPlan(request, context);
+            var observed = new List<Uri> { plan.Next() };
+
+            refreshed = true;
+            InvokeUpdateLiveNodes(liveNodes);
+            server.WaitForRequests();
+            observed.AddRange(plan);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(observed.Select(node => node.Host), Is.EquivalentTo(new[] { "127.0.0.3", "127.0.0.4", "127.0.0.5" }));
+                Assert.That(plan.HasNext, Is.False);
+                Assert.That(() => plan.Next(), Throws.InvalidOperationException);
+                Assert.That(plan.ToList(), Is.Empty);
+                Assert.That(interceptor.GetOrCreateQueryPlan(request, context), Is.SameAs(plan));
+                Assert.That(
+                    interceptor.GetOrCreateQueryPlan(request, new Dictionary<string, object>()).Select(node => node.Host),
+                    Is.EquivalentTo(new[] { "127.0.0.6", "127.0.0.7" }));
+            });
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void AffinityResolvesFullChainOnceOnInitializationOrLateActivationTest(bool lateActivation)
+        {
+            var custom = new TrackingRoutingScope(ClusterScope.create(), () => "dc=dc2");
+            var scope = RackScope.of(
+                "dc1",
+                "rack1",
+                RackScope.of("dc1", "rack1", DatacenterScope.of("dc1", custom)));
+            var handler = new ScopeAwareDiscoveryHttpMessageHandler("rack.example.com", Array.Empty<string>());
+            using var client = new HttpClient(handler);
+            var builder = AlternatorConfig.builder()
+                .withSeedHost("seed.example.com")
+                .withScheme("http")
+                .withPort(8043)
+                .withRoutingScope(scope);
+            var affinity = KeyRouteAffinityConfig.builder().withType(KeyRouteAffinity.ANY_WRITE).build();
+            if (!lateActivation)
+            {
+                builder.withKeyRouteAffinity(affinity);
+            }
+
+            var liveNodes = new AlternatorLiveNodes(builder.build(), client);
+            Assert.That(custom.FallbackReads, Is.EqualTo(lateActivation ? 0 : 1));
+            _ = new AffinityQueryPlanInterceptor(affinity, liveNodes);
+            _ = new AffinityQueryPlanInterceptor(affinity, liveNodes);
+            Assert.That(custom.FallbackReads, Is.EqualTo(1));
+            Assert.That(handler.RequestedUris, Is.Empty);
+
+            InvokeUpdateLiveNodes(liveNodes);
+            InvokeUpdateLiveNodes(liveNodes);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(custom.FallbackReads, Is.EqualTo(1));
+                Assert.That(liveNodes.GetRoutingScope(), Is.SameAs(scope));
+                Assert.That(handler.RequestedUris.Select(uri => uri.Query), Is.EqualTo(new[]
+                {
+                    "?dc=dc1&rack=rack1", "?dc=dc1", "?dc=dc2",
+                    "?dc=dc1&rack=rack1", "?dc=dc1", "?dc=dc2",
+                }));
+            });
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void AffinityRetainsCustomQueriesThatDivergeAfterEquivalentDiscoveryTest(bool matchesBuiltIn)
+        {
+            var phase = 0;
+            var firstQueryReads = 0;
+            var secondQueryReads = 0;
+            var sharedQuery = matchesBuiltIn ? "dc=dc1" : "dc=custom";
+            var second = new TrackingRoutingScope(ClusterScope.create(), () =>
+            {
+                secondQueryReads++;
+                return phase == 0 ? sharedQuery : "dc=other";
+            });
+            var first = new TrackingRoutingScope(second, () =>
+            {
+                firstQueryReads++;
+                return sharedQuery;
+            });
+            var scope = RackScope.of("dc1", "rack1", first);
+            using var server = new LocalNodesServer(
+                matchesBuiltIn ? 6 : 8,
+                request => request.Query.Contains("&rack=") ? "[\"127.0.0.2\"]"
+                    : request.Query == "dc=other" ? "[\"127.0.0.3\"]" : "[]");
+            var liveNodes = new AlternatorLiveNodes(AlternatorConfig.builder()
+                .withSeedHost("127.0.0.1")
+                .withScheme("http")
+                .withPort(server.Port)
+                .withRoutingScope(scope)
+                .withKeyRouteAffinity(KeyRouteAffinity.ANY_WRITE)
+                .build());
+
+            Assert.That(firstQueryReads + secondQueryReads, Is.Zero);
+            var initialFirstFallbackReads = first.FallbackReads;
+            var initialSecondFallbackReads = second.FallbackReads;
+            InvokeUpdateLiveNodes(liveNodes);
+            phase = 1;
+            InvokeUpdateLiveNodes(liveNodes);
+            server.WaitForRequests();
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(initialFirstFallbackReads, Is.EqualTo(1));
+                Assert.That(initialSecondFallbackReads, Is.EqualTo(1));
+                Assert.That(firstQueryReads, Is.EqualTo(2));
+                Assert.That(secondQueryReads, Is.EqualTo(2));
+                Assert.That(first.FallbackReads, Is.EqualTo(1));
+                Assert.That(second.FallbackReads, Is.EqualTo(1));
+                Assert.That(liveNodes.GetLiveNodes().Select(node => node.Host), Is.EqualTo(new[] { "127.0.0.2" }));
+                Assert.That(LazyQueryPlan.sortedAffinityNodes(liveNodes).Select(node => node.Host), Is.EqualTo(new[] { "127.0.0.3" }));
+                Assert.That(server.Requests.Select(request => request.Query), Is.EqualTo(matchesBuiltIn
+                    ? new[] { "dc=dc1&rack=rack1", "dc=dc1", string.Empty, "dc=dc1&rack=rack1", "dc=dc1", "dc=other" }
+                    : new[] { "dc=dc1&rack=rack1", "dc=dc1", "dc=custom", string.Empty, "dc=dc1&rack=rack1", "dc=dc1", "dc=custom", "dc=other" }));
+            });
         }
 
         [TestCase(true, "rack.example.com")]
@@ -1045,7 +1194,7 @@ namespace ScyllaDB.Alternator
         }
 
         [Test]
-        public void SuccessfulDatacenterAffinityDoesNotReadUnusedCustomFallbackTest()
+        public void SuccessfulDatacenterAffinityResolvesButDoesNotDiscoverUnusedCustomFallbackTest()
         {
             var handler = new DiscoveryHttpMessageHandler(
                 new Dictionary<string, string> { ["seed.example.com"] = "[\"node.example.com\"]" });
@@ -1063,7 +1212,7 @@ namespace ScyllaDB.Alternator
 
             InvokeUpdateLiveNodes(liveNodes);
 
-            Assert.That(unusedScope.FallbackReads, Is.Zero);
+            Assert.That(unusedScope.FallbackReads, Is.EqualTo(1));
             Assert.That(LazyQueryPlan.sortedAffinityNodes(liveNodes).Select(node => node.Host), Is.EqualTo(new[] { "node.example.com" }));
             Assert.That(handler.RequestedUris.Select(uri => uri.Query), Is.EqualTo(new[] { "?dc=dc1&rack=rack1", "?dc=dc1" }));
         }
