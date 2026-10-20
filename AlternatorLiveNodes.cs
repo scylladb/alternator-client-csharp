@@ -41,7 +41,12 @@ namespace ScyllaDB.Alternator
         private readonly bool ownsPollingHttpClient;
         private readonly NodeHealthStore healthStore;
         private readonly object updateSignalLock = new object();
+        private volatile AffinityScopeChain? affinityScopes;
+        private volatile bool requiresAffinityNodes;
         private List<Uri> liveNodes;
+        private List<Uri> affinityNodes;
+        private HashSet<Uri> liveNodeMembership;
+        private HashSet<Uri> affinityNodeMembership;
         private int nextLiveNodeIndex;
         private int nextQuarantinedNodeIndex;
         private int nextQuarantineTrafficSequence;
@@ -133,6 +138,16 @@ namespace ScyllaDB.Alternator
                 this.liveNodes.Add(node);
             }
 
+            this.liveNodeMembership = new HashSet<Uri>(this.liveNodes);
+            this.affinityNodes = new List<Uri>(this.liveNodes);
+            this.affinityNodeMembership = new HashSet<Uri>(this.affinityNodes);
+            if (config.KeyRouteAffinityConfig?.IsEnabled == true)
+            {
+                var resolved = new AffinityScopeChain(config.RoutingScope);
+                this.affinityScopes = resolved;
+                this.requiresAffinityNodes = resolved.HasRack;
+            }
+
             this.healthStore = new NodeHealthStore(this.config.NodeHealth, this.initialNodes);
 
             try
@@ -143,6 +158,13 @@ namespace ScyllaDB.Alternator
             {
                 throw new SystemException(e.Message, e);
             }
+        }
+
+        internal enum QueryPlanCaptureMode
+        {
+            Seeded,
+            Batch,
+            Preferred,
         }
 
         public Task Start(CancellationToken cancellationToken = default)
@@ -262,14 +284,14 @@ namespace ScyllaDB.Alternator
 
         public IReadOnlyList<Uri> GetLiveNodes()
         {
-            this.liveNodesLock.EnterReadLock();
+            var lockTaken = this.EnterLiveNodesReadLock();
             try
             {
                 return this.liveNodes.ToList().AsReadOnly();
             }
             finally
             {
-                this.liveNodesLock.ExitReadLock();
+                this.ExitLiveNodesReadLock(lockTaken);
             }
         }
 
@@ -320,7 +342,7 @@ namespace ScyllaDB.Alternator
             List<Uri> nodes;
             try
             {
-                nodes = this.GetNodesForScope(scope);
+                nodes = this.GetNodesForScope(scope, scope.LocalNodesQuery);
             }
             catch (Exception e)
             {
@@ -498,11 +520,8 @@ namespace ScyllaDB.Alternator
 
         internal Uri GetNodeForHash(long hash)
         {
-            var nodes = this.GetActiveNodesInternal();
-            if (nodes.Count == 0)
-            {
-                nodes = this.GetQuarantinedNodesInternal();
-            }
+            var snapshot = this.CaptureQueryPlanNodes();
+            var nodes = snapshot.PrimaryNodes.Count != 0 ? snapshot.PrimaryNodes : snapshot.FallbackNodes;
 
             if (nodes.Count == 0)
             {
@@ -515,12 +534,8 @@ namespace ScyllaDB.Alternator
 
         internal LazyQueryPlan CreateQueryPlan(long seed)
         {
-            return new LazyQueryPlan(this, seed);
-        }
-
-        internal LazyQueryPlan CreateQueryPlan(IEnumerable<Uri> preferredNodes)
-        {
-            return new LazyQueryPlan(this, preferredNodes);
+            var nodes = this.CaptureQueryPlanNodes();
+            return new LazyQueryPlan(nodes.PrimaryNodes, nodes.FallbackNodes, seed);
         }
 
         internal LazyQueryPlan CreateQueryPlan()
@@ -528,32 +543,167 @@ namespace ScyllaDB.Alternator
             return new LazyQueryPlan(this);
         }
 
+        internal void EnableAffinityNodes()
+        {
+            this.liveNodesLock.EnterWriteLock();
+            try
+            {
+                if (this.affinityScopes != null)
+                {
+                    return;
+                }
+
+                var resolved = new AffinityScopeChain(this.config.RoutingScope);
+                this.affinityScopes = resolved;
+                if (!resolved.HasRack)
+                {
+                    return;
+                }
+
+                this.SetAffinityNodes(new List<Uri>(this.liveNodes));
+                this.healthStore.SetKnownNodes(this.liveNodes.Concat(this.affinityNodes));
+                this.requiresAffinityNodes = true;
+            }
+            finally
+            {
+                this.liveNodesLock.ExitWriteLock();
+            }
+        }
+
+        internal IReadOnlyList<Uri> GetOrdinaryActiveNodes()
+        {
+            return this.FilterOrdinaryHealthNodes(this.GetActiveNodesInternal());
+        }
+
+        internal IReadOnlyList<Uri> GetOrdinaryQuarantinedNodes()
+        {
+            return this.FilterOrdinaryHealthNodes(this.GetQuarantinedNodesInternal());
+        }
+
+        internal (IReadOnlyList<Uri> PrimaryNodes, IReadOnlyList<Uri> FallbackNodes) CaptureQueryPlanNodes(
+            QueryPlanCaptureMode mode = QueryPlanCaptureMode.Seeded)
+        {
+            // Overrides may activate affinity or publish topology while providing health.
+            var activeHealth = this.GetActiveNodesInternal().ToArray();
+            var quarantinedHealth = this.GetQuarantinedNodesInternal().ToArray();
+            var lockTaken = this.EnterLiveNodesReadLock();
+            try
+            {
+                var useAffinity = this.requiresAffinityNodes;
+                IReadOnlyList<Uri> activeNodes = useAffinity
+                    ? FilterHealthNodes(activeHealth, this.affinityNodeMembership)
+                    : Array.AsReadOnly(activeHealth);
+                IReadOnlyList<Uri> quarantinedNodes = useAffinity
+                    ? FilterHealthNodes(quarantinedHealth, this.affinityNodeMembership)
+                    : Array.AsReadOnly(quarantinedHealth);
+                switch (mode)
+                {
+                    case QueryPlanCaptureMode.Seeded:
+                        if (activeNodes.Count != 0)
+                        {
+                            return (activeNodes, quarantinedNodes);
+                        }
+
+                        if (quarantinedNodes.Count != 0)
+                        {
+                            return (quarantinedNodes, Array.Empty<Uri>());
+                        }
+
+                        break;
+                    case QueryPlanCaptureMode.Preferred:
+                        if (activeNodes.Count != 0 || quarantinedNodes.Count != 0)
+                        {
+                            return (activeNodes, quarantinedNodes);
+                        }
+
+                        break;
+                    case QueryPlanCaptureMode.Batch:
+                    default:
+                        // Batch voting requires active affinity candidates.
+                        if (activeNodes.Count != 0)
+                        {
+                            return (activeNodes, quarantinedNodes);
+                        }
+
+                        break;
+                }
+
+                return useAffinity
+                    ? (FilterHealthNodes(activeHealth, this.liveNodeMembership),
+                        FilterHealthNodes(quarantinedHealth, this.liveNodeMembership))
+                    : (activeNodes, quarantinedNodes);
+            }
+            finally
+            {
+                this.ExitLiveNodesReadLock(lockTaken);
+            }
+        }
+
         protected internal virtual IReadOnlyList<Uri> GetLiveNodesInternal()
         {
-            this.liveNodesLock.EnterReadLock();
+            var lockTaken = this.EnterLiveNodesReadLock();
             try
             {
                 return this.liveNodes;
             }
             finally
             {
-                this.liveNodesLock.ExitReadLock();
+                this.ExitLiveNodesReadLock(lockTaken);
             }
         }
 
         protected internal virtual IReadOnlyList<Uri> GetActiveNodesInternal()
         {
-            return this.healthStore.GetActiveNodes();
+            if (!this.requiresAffinityNodes)
+            {
+                return this.healthStore.GetActiveNodes();
+            }
+
+            var lockTaken = this.EnterLiveNodesReadLock();
+            try
+            {
+                return this.healthStore.GetActiveNodes();
+            }
+            finally
+            {
+                this.ExitLiveNodesReadLock(lockTaken);
+            }
         }
 
         protected internal virtual IReadOnlyList<Uri> GetQuarantinedNodesInternal()
         {
-            return this.healthStore.GetQuarantinedNodes();
+            if (!this.requiresAffinityNodes)
+            {
+                return this.healthStore.GetQuarantinedNodes();
+            }
+
+            var lockTaken = this.EnterLiveNodesReadLock();
+            try
+            {
+                return this.healthStore.GetQuarantinedNodes();
+            }
+            finally
+            {
+                this.ExitLiveNodesReadLock(lockTaken);
+            }
         }
 
         protected internal virtual IReadOnlyList<Uri> GetDownNodesInternal()
         {
-            return this.healthStore.GetDownNodes();
+            if (!this.requiresAffinityNodes)
+            {
+                return this.healthStore.GetDownNodes();
+            }
+
+            var lockTaken = this.EnterLiveNodesReadLock();
+            try
+            {
+                return this.healthStore.GetDownNodes();
+            }
+            finally
+            {
+                this.ExitLiveNodesReadLock(lockTaken);
+            }
         }
 
 #pragma warning disable SA1300, IDE1006
@@ -647,6 +797,23 @@ namespace ScyllaDB.Alternator
             return (int)(((value % divisor) + divisor) % divisor);
         }
 
+        private static IReadOnlyList<Uri> FilterHealthNodes(
+            IReadOnlyList<Uri> healthNodes,
+            HashSet<Uri> allowedNodes)
+        {
+            return healthNodes.Where(allowedNodes.Contains).ToList().AsReadOnly();
+        }
+
+        private static (bool AggregateSeeds, string Query) GetDiscoveryOperationKey(RoutingScope scope, string query)
+        {
+            return (scope is ClusterScope, query);
+        }
+
+        private static bool IsBuiltInScope(RoutingScope scope)
+        {
+            return scope is RackScope || scope is DatacenterScope || scope is ClusterScope;
+        }
+
         private static AlternatorConfig CreateLegacyConfig(
             List<Uri> nodes,
             string scheme,
@@ -682,6 +849,44 @@ namespace ScyllaDB.Alternator
             }
 
             return RackScope.Of(dc, rackName, DatacenterScope.Of(dc, ClusterScope.Create()));
+        }
+
+        private IReadOnlyList<Uri> FilterOrdinaryHealthNodes(IReadOnlyList<Uri> healthNodes)
+        {
+            if (!this.requiresAffinityNodes)
+            {
+                return healthNodes;
+            }
+
+            // Materialize custom observations before taking the topology lock.
+            var healthSnapshot = healthNodes.ToArray();
+            var lockTaken = this.EnterLiveNodesReadLock();
+            try
+            {
+                return FilterHealthNodes(healthSnapshot, this.liveNodeMembership);
+            }
+            finally
+            {
+                this.ExitLiveNodesReadLock(lockTaken);
+            }
+        }
+
+        private void UseSeparateAffinityView()
+        {
+            if (this.requiresAffinityNodes)
+            {
+                return;
+            }
+
+            this.liveNodesLock.EnterWriteLock();
+            try
+            {
+                this.requiresAffinityNodes = true;
+            }
+            finally
+            {
+                this.liveNodesLock.ExitWriteLock();
+            }
         }
 
         private void UpdateCycle(CancellationToken cancellationToken)
@@ -748,11 +953,11 @@ namespace ScyllaDB.Alternator
 
         private Uri SelectNextUri()
         {
-            var activeNodes = this.GetActiveNodesInternal();
+            var activeNodes = this.GetOrdinaryActiveNodes();
             if (activeNodes.Count == 0)
             {
-                this.ProbeDownNodesOnce(CancellationToken.None);
-                activeNodes = this.GetActiveNodesInternal();
+                this.ProbeDownNodesOnce(CancellationToken.None, ordinaryOnly: true);
+                activeNodes = this.GetOrdinaryActiveNodes();
             }
 
             var quarantinedNode = this.SelectQuarantinedNode(activeNodes.Count == 0);
@@ -845,8 +1050,44 @@ namespace ScyllaDB.Alternator
             this.liveNodesLock.EnterWriteLock();
             try
             {
+                var membership = new HashSet<Uri>(nodes);
+                var previousNodes = this.liveNodes;
                 this.liveNodes = nodes;
-                this.healthStore.SetKnownNodes(nodes);
+                this.liveNodeMembership = membership;
+                if (!this.requiresAffinityNodes)
+                {
+                    this.SetAffinityNodes(new List<Uri>(nodes));
+                }
+
+                // Keep records until auxiliary discovery determines the completed managed set.
+                this.healthStore.SetKnownNodes(this.requiresAffinityNodes
+                    ? previousNodes.Concat(this.liveNodes).Concat(this.affinityNodes)
+                    : this.liveNodes);
+            }
+            finally
+            {
+                this.liveNodesLock.ExitWriteLock();
+            }
+        }
+
+        private void SetAffinityNodes(List<Uri> nodes)
+        {
+            var membership = new HashSet<Uri>(nodes);
+            this.affinityNodes = nodes;
+            this.affinityNodeMembership = membership;
+        }
+
+        private void CompleteAffinityRefresh(List<Uri>? nodes)
+        {
+            this.liveNodesLock.EnterWriteLock();
+            try
+            {
+                if (nodes != null)
+                {
+                    this.SetAffinityNodes(nodes);
+                }
+
+                this.healthStore.SetKnownNodes(this.liveNodes.Concat(this.affinityNodes));
             }
             finally
             {
@@ -858,14 +1099,30 @@ namespace ScyllaDB.Alternator
         {
             var scope = this.config.RoutingScope;
             Exception? lastException = null;
+            var discovered = new Dictionary<(bool AggregateSeeds, string Query), List<Uri>>();
+            var observations = new ScopeObservations();
             while (scope != null)
             {
+                var chain = this.affinityScopes;
+                if (chain != null && scope is RackScope)
+                {
+                    this.UseSeparateAffinityView();
+                }
+
+                var observation = observations.Add(scope);
                 try
                 {
-                    var nodes = this.GetNodesForScope(scope);
+                    var query = observation.Query;
+                    var key = GetDiscoveryOperationKey(scope, query);
+
+                    // Retain a failed attempt so affinity does not repeat it within this refresh.
+                    discovered[key] = new List<Uri>();
+                    var nodes = this.GetNodesForScope(scope, query);
+                    discovered[key] = nodes;
                     if (nodes.Count != 0)
                     {
                         this.SetLiveNodes(nodes);
+                        this.UpdateAffinityNodes(discovered, observations);
                         Logger.Info($"Updated hosts to {this.liveNodes} using {scope.Description}");
                         return;
                     }
@@ -881,22 +1138,88 @@ namespace ScyllaDB.Alternator
                     Logger.Warn($"No nodes found for {scope.Description}; falling back to {scope.Fallback.Description}");
                 }
 
-                scope = scope.Fallback;
+                var fallback = scope.Fallback;
+                observation.RecordFallback(fallback);
+                scope = fallback;
             }
 
             if (lastException != null)
             {
                 this.SetLiveNodes(this.MergeWithInitialNodes(this.GetLiveNodes().ToList()));
+                this.UpdateAffinityNodes(discovered, observations);
                 Logger.Warn("All nodes unreachable in every routing scope, re-injected seed nodes into live list");
                 return;
             }
 
+            this.UpdateAffinityNodes(discovered, observations);
             Logger.Warn("No nodes found in any routing scope, keeping existing node list");
         }
 
-        private List<Uri> GetNodesForScope(RoutingScope scope)
+        private void UpdateAffinityNodes(
+            Dictionary<(bool AggregateSeeds, string Query), List<Uri>> discovered,
+            ScopeObservations observations)
         {
-            var query = scope.LocalNodesQuery;
+            var chain = this.affinityScopes;
+            if (chain == null || !this.requiresAffinityNodes)
+            {
+                return;
+            }
+
+            List<Uri>? refreshedNodes = null;
+            var operation = "query unavailable";
+            try
+            {
+                for (var index = 0; ; index++)
+                {
+                    var occurrence = chain.Get(index, observations);
+                    if (!occurrence.HasValue)
+                    {
+                        break;
+                    }
+
+                    var scope = occurrence.Value.Scope;
+                    operation = $"scope {index} (query unavailable)";
+                    try
+                    {
+                        var query = IsBuiltInScope(scope)
+                            ? scope.LocalNodesQuery
+                            : observations.Get(scope, occurrence.Value.Number).Query;
+                        var key = GetDiscoveryOperationKey(scope, query);
+                        operation = $"query '{(string.IsNullOrEmpty(query) ? "<default>" : query)}' (aggregate seeds: {key.AggregateSeeds})";
+                        if (!discovered.TryGetValue(key, out var nodes))
+                        {
+                            discovered[key] = new List<Uri>();
+                            nodes = this.GetNodesForScope(scope, query);
+                            discovered[key] = nodes;
+                        }
+
+                        if (nodes.Count != 0)
+                        {
+                            refreshedNodes = new List<Uri>(nodes);
+                            Logger.Info($"Updated key-route affinity hosts to {string.Join(", ", nodes)} using {operation}");
+                            return;
+                        }
+                    }
+                    catch (Exception e)
+                    {
+                        Logger.Warn(e, $"Failed to discover key-route affinity nodes for {operation}");
+                    }
+                }
+
+                Logger.Warn("No nodes found in any affinity scope; keeping existing affinity nodes");
+            }
+            catch (Exception e)
+            {
+                Logger.Warn(e, $"Failed to resolve deferred affinity fallback after {operation}; keeping existing affinity nodes and retrying next refresh");
+            }
+            finally
+            {
+                this.CompleteAffinityRefresh(refreshedNodes);
+            }
+        }
+
+        private List<Uri> GetNodesForScope(RoutingScope scope, string query)
+        {
             var requestQuery = string.IsNullOrEmpty(query) ? null : query;
             Exception? lastException = null;
             var nodes = new List<Uri>();
@@ -1009,7 +1332,7 @@ namespace ScyllaDB.Alternator
 
         private Uri? SelectQuarantinedNode(bool activeNodesEmpty)
         {
-            var quarantinedNodes = this.GetQuarantinedNodesInternal();
+            var quarantinedNodes = this.GetOrdinaryQuarantinedNodes();
             if (quarantinedNodes.Count == 0)
             {
                 return null;
@@ -1028,11 +1351,16 @@ namespace ScyllaDB.Alternator
             return quarantinedNodes[Mod(sequence, quarantinedNodes.Count)];
         }
 
-        private void ProbeDownNodesOnce(CancellationToken cancellationToken)
+        private void ProbeDownNodesOnce(CancellationToken cancellationToken, bool ordinaryOnly = false)
         {
             try
             {
-                this.ProbeDownNodesAsync(cancellationToken).GetAwaiter().GetResult();
+                var ordinaryNodes = ordinaryOnly ? new HashSet<Uri>(this.GetLiveNodes()) : null;
+                this.healthStore.ProbeDownNodesAsync(
+                    (node, status, token) => ordinaryNodes == null || ordinaryNodes.Contains(node)
+                        ? this.ProbeNodeAsync(node, status, token)
+                        : Task.FromResult<NodeHealthObservation?>(null),
+                    cancellationToken).GetAwaiter().GetResult();
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -1103,6 +1431,25 @@ namespace ScyllaDB.Alternator
             return merged;
         }
 
+        private bool EnterLiveNodesReadLock()
+        {
+            if (this.liveNodesLock.IsReadLockHeld || this.liveNodesLock.IsWriteLockHeld)
+            {
+                return false;
+            }
+
+            this.liveNodesLock.EnterReadLock();
+            return true;
+        }
+
+        private void ExitLiveNodesReadLock(bool lockTaken)
+        {
+            if (lockTaken)
+            {
+                this.liveNodesLock.ExitReadLock();
+            }
+        }
+
         public class ValidationError : ScyllaDB.Alternator.ValidationError
         {
             public ValidationError(string message)
@@ -1126,6 +1473,141 @@ namespace ScyllaDB.Alternator
             public FailedToCheck(string message)
                 : base(message)
             {
+            }
+        }
+
+        private sealed class AffinityScopeChain
+        {
+            private readonly object sync = new object();
+            private readonly List<(RoutingScope Scope, int Number)> scopes = new List<(RoutingScope, int)>();
+            private readonly HashSet<(bool AggregateSeeds, string Query)> operations = new HashSet<(bool, string)>();
+            private readonly Dictionary<RoutingScope, int> occurrences = new Dictionary<RoutingScope, int>(ReferenceEqualityComparer.Instance);
+            private RoutingScope? pending;
+            private int pendingNumber;
+
+            internal AffinityScopeChain(RoutingScope scope)
+            {
+                this.HasRack = this.AppendBuiltInPrefix(scope);
+            }
+
+            // Only the prefix resolved during construction determines this fact.
+            internal bool HasRack { get; }
+
+            internal (RoutingScope Scope, int Number)? Get(int index, ScopeObservations observations)
+            {
+                lock (this.sync)
+                {
+                    while (index >= this.scopes.Count && this.pending != null)
+                    {
+                        // Failed getters leave the boundary unresolved for the next refresh.
+                        var fallback = observations.Get(this.pending, this.pendingNumber).GetFallback();
+                        this.pending = null;
+                        _ = this.AppendBuiltInPrefix(fallback);
+                    }
+
+                    return index < this.scopes.Count ? this.scopes[index] : null;
+                }
+            }
+
+            private bool AppendBuiltInPrefix(RoutingScope? scope)
+            {
+                var hasRack = false;
+                while (scope != null)
+                {
+                    if (!IsBuiltInScope(scope))
+                    {
+                        this.occurrences.TryGetValue(scope, out var number);
+                        this.occurrences[scope] = number + 1;
+                        this.scopes.Add((scope, number));
+                        this.pending = scope;
+                        this.pendingNumber = number;
+                        return hasRack;
+                    }
+
+                    var derived = scope;
+                    if (scope is RackScope rack)
+                    {
+                        derived = DatacenterScope.Of(rack.Datacenter, null);
+                        hasRack = true;
+                    }
+
+                    if (this.operations.Add(GetDiscoveryOperationKey(derived, derived.LocalNodesQuery)))
+                    {
+                        this.scopes.Add((derived, 0));
+                    }
+
+                    scope = scope.Fallback;
+                }
+
+                return hasRack;
+            }
+        }
+
+        private sealed class ScopeObservations
+        {
+            private readonly Dictionary<RoutingScope, List<ScopeObservation>> scopes =
+                new Dictionary<RoutingScope, List<ScopeObservation>>(ReferenceEqualityComparer.Instance);
+
+            internal ScopeObservation Add(RoutingScope scope)
+            {
+                var visits = this.GetVisits(scope);
+                var observation = new ScopeObservation(scope);
+                visits.Add(observation);
+                return observation;
+            }
+
+            internal ScopeObservation Get(RoutingScope scope, int number)
+            {
+                var visits = this.GetVisits(scope);
+                while (visits.Count <= number)
+                {
+                    visits.Add(new ScopeObservation(scope));
+                }
+
+                return visits[number];
+            }
+
+            private List<ScopeObservation> GetVisits(RoutingScope scope)
+            {
+                if (!this.scopes.TryGetValue(scope, out var visits))
+                {
+                    visits = new List<ScopeObservation>();
+                    this.scopes.Add(scope, visits);
+                }
+
+                return visits;
+            }
+        }
+
+        private sealed class ScopeObservation
+        {
+            private readonly RoutingScope scope;
+            private readonly Lazy<string> query;
+            private bool fallbackCaptured;
+            private RoutingScope? fallback;
+
+            internal ScopeObservation(RoutingScope scope)
+            {
+                this.scope = scope;
+                this.query = new Lazy<string>(() => scope.LocalNodesQuery);
+            }
+
+            internal string Query => this.query.Value;
+
+            internal RoutingScope? GetFallback()
+            {
+                if (!this.fallbackCaptured)
+                {
+                    this.RecordFallback(this.scope.Fallback);
+                }
+
+                return this.fallback;
+            }
+
+            internal void RecordFallback(RoutingScope? observed)
+            {
+                this.fallback = observed;
+                this.fallbackCaptured = true;
             }
         }
     }
