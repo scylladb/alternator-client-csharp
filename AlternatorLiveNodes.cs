@@ -41,7 +41,7 @@ namespace ScyllaDB.Alternator
         private readonly bool ownsPollingHttpClient;
         private readonly NodeHealthStore healthStore;
         private readonly object updateSignalLock = new object();
-        private IReadOnlyList<RoutingScope>? affinityScopes;
+        private volatile AffinityScopeChain? affinityScopes;
         private volatile bool requiresAffinityNodes;
         private List<Uri> liveNodes;
         private List<Uri> affinityNodes;
@@ -139,8 +139,8 @@ namespace ScyllaDB.Alternator
             this.affinityNodes = new List<Uri>(this.liveNodes);
             if (config.KeyRouteAffinityConfig?.IsEnabled == true)
             {
-                var resolved = CreateAffinityScopes(config.RoutingScope);
-                this.affinityScopes = resolved.Scopes;
+                var resolved = new AffinityScopeChain(config.RoutingScope);
+                this.affinityScopes = resolved;
                 this.requiresAffinityNodes = resolved.HasRack;
             }
 
@@ -791,53 +791,9 @@ namespace ScyllaDB.Alternator
             return healthNodes.Where(allowed.Contains).ToList().AsReadOnly();
         }
 
-        private static string CaptureScopeQuery(RoutingScope scope, Dictionary<RoutingScope, Lazy<string>> queries)
+        private static bool IsBuiltInScope(RoutingScope scope)
         {
-            if (!queries.TryGetValue(scope, out var query))
-            {
-                query = new Lazy<string>(() => scope.LocalNodesQuery);
-                queries.Add(scope, query);
-            }
-
-            return query.Value;
-        }
-
-        private static (IReadOnlyList<RoutingScope> Scopes, bool HasRack) CreateAffinityScopes(RoutingScope scope)
-        {
-            var scopes = new List<RoutingScope>();
-            var operations = new HashSet<(bool AggregateSeeds, string Query)>();
-            var visited = new HashSet<RoutingScope>(ReferenceEqualityComparer.Instance);
-            var hasRack = false;
-            for (RoutingScope? current = scope; current != null && visited.Add(current);)
-            {
-                var affinityScope = current;
-                if (current is RackScope rack)
-                {
-                    affinityScope = DatacenterScope.Of(rack.Datacenter, null);
-                    hasRack = true;
-                }
-
-                // Custom queries can change between refreshes. Deduplicate their current
-                // operations in the refresh cache, without removing the original scopes.
-                if ((affinityScope is not DatacenterScope && affinityScope is not ClusterScope)
-                    || operations.Add((affinityScope is ClusterScope, affinityScope.LocalNodesQuery)))
-                {
-                    scopes.Add(affinityScope);
-                }
-
-                try
-                {
-                    current = current.Fallback;
-                }
-                catch (Exception e)
-                {
-                    // An auxiliary scope getter must not introduce a new startup failure.
-                    Logger.Warn(e, "Failed to resolve an affinity fallback; keeping the resolved scopes");
-                    break;
-                }
-            }
-
-            return (scopes.AsReadOnly(), hasRack);
+            return scope is RackScope || scope is DatacenterScope || scope is ClusterScope;
         }
 
         private static AlternatorConfig CreateLegacyConfig(
@@ -923,8 +879,8 @@ namespace ScyllaDB.Alternator
                     return false;
                 }
 
-                var resolved = CreateAffinityScopes(this.config.RoutingScope);
-                this.affinityScopes = resolved.Scopes;
+                var resolved = new AffinityScopeChain(this.config.RoutingScope);
+                this.affinityScopes = resolved;
                 if (!resolved.HasRack)
                 {
                     return false;
@@ -934,6 +890,24 @@ namespace ScyllaDB.Alternator
                 this.healthStore.SetKnownNodes(this.liveNodes.Concat(this.affinityNodes));
                 this.requiresAffinityNodes = true;
                 return true;
+            }
+            finally
+            {
+                this.liveNodesLock.ExitWriteLock();
+            }
+        }
+
+        private void ActivateResolvedAffinityNodes()
+        {
+            if (this.requiresAffinityNodes)
+            {
+                return;
+            }
+
+            this.liveNodesLock.EnterWriteLock();
+            try
+            {
+                this.requiresAffinityNodes = true;
             }
             finally
             {
@@ -1143,12 +1117,20 @@ namespace ScyllaDB.Alternator
             var scope = this.config.RoutingScope;
             Exception? lastException = null;
             var discovered = new Dictionary<(bool AggregateSeeds, string Query), List<Uri>>();
-            var queries = new Dictionary<RoutingScope, Lazy<string>>(ReferenceEqualityComparer.Instance);
+            var observations = new ScopeObservations();
             while (scope != null)
             {
+                var chain = this.affinityScopes;
+                if (chain != null && scope is RackScope)
+                {
+                    chain.ObserveRack();
+                    this.ActivateResolvedAffinityNodes();
+                }
+
+                var observation = observations.Add(scope);
                 try
                 {
-                    var query = CaptureScopeQuery(scope, queries);
+                    var query = observation.Query;
                     var key = (AggregateSeeds: scope is ClusterScope, Query: query);
 
                     // Retain a failed attempt so affinity does not repeat it within this refresh.
@@ -1158,7 +1140,7 @@ namespace ScyllaDB.Alternator
                     if (nodes.Count != 0)
                     {
                         this.SetLiveNodes(nodes);
-                        this.UpdateAffinityNodes(discovered, queries);
+                        this.UpdateAffinityNodes(discovered, observations);
                         Logger.Info($"Updated hosts to {this.liveNodes} using {scope.Description}");
                         return;
                     }
@@ -1174,26 +1156,29 @@ namespace ScyllaDB.Alternator
                     Logger.Warn($"No nodes found for {scope.Description}; falling back to {scope.Fallback.Description}");
                 }
 
-                scope = scope.Fallback;
+                var fallback = scope.Fallback;
+                observation.RecordFallback(fallback);
+                scope = fallback;
             }
 
             if (lastException != null)
             {
                 this.SetLiveNodes(this.MergeWithInitialNodes(this.GetLiveNodes().ToList()));
-                this.UpdateAffinityNodes(discovered, queries);
+                this.UpdateAffinityNodes(discovered, observations);
                 Logger.Warn("All nodes unreachable in every routing scope, re-injected seed nodes into live list");
                 return;
             }
 
-            this.UpdateAffinityNodes(discovered, queries);
+            this.UpdateAffinityNodes(discovered, observations);
             Logger.Warn("No nodes found in any routing scope, keeping existing node list");
         }
 
         private void UpdateAffinityNodes(
             Dictionary<(bool AggregateSeeds, string Query), List<Uri>> discovered,
-            Dictionary<RoutingScope, Lazy<string>> queries)
+            ScopeObservations observations)
         {
-            if (!this.requiresAffinityNodes)
+            var chain = this.affinityScopes;
+            if (chain == null || !this.requiresAffinityNodes)
             {
                 return;
             }
@@ -1201,11 +1186,25 @@ namespace ScyllaDB.Alternator
             List<Uri>? refreshedNodes = null;
             try
             {
-                foreach (var scope in this.affinityScopes!)
+                for (var index = 0; ; index++)
                 {
+                    var occurrence = chain.Get(index, observations);
+                    if (chain.HasRack)
+                    {
+                        this.ActivateResolvedAffinityNodes();
+                    }
+
+                    if (!occurrence.HasValue)
+                    {
+                        break;
+                    }
+
+                    var scope = occurrence.Value.Scope;
                     try
                     {
-                        var query = CaptureScopeQuery(scope, queries);
+                        var query = IsBuiltInScope(scope)
+                            ? scope.LocalNodesQuery
+                            : observations.Get(scope, occurrence.Value.Number).Query;
                         var key = (AggregateSeeds: scope is ClusterScope, Query: query);
                         if (!discovered.TryGetValue(key, out var nodes))
                         {
@@ -1235,7 +1234,10 @@ namespace ScyllaDB.Alternator
             }
             finally
             {
-                this.CompleteAffinityRefresh(refreshedNodes);
+                if (this.requiresAffinityNodes)
+                {
+                    this.CompleteAffinityRefresh(refreshedNodes);
+                }
             }
         }
 
@@ -1494,6 +1496,143 @@ namespace ScyllaDB.Alternator
             public FailedToCheck(string message)
                 : base(message)
             {
+            }
+        }
+
+        private sealed class AffinityScopeChain
+        {
+            private readonly object sync = new object();
+            private readonly List<(RoutingScope Scope, int Number)> scopes = new List<(RoutingScope, int)>();
+            private readonly HashSet<(bool AggregateSeeds, string Query)> operations = new HashSet<(bool, string)>();
+            private readonly Dictionary<RoutingScope, int> occurrences = new Dictionary<RoutingScope, int>(ReferenceEqualityComparer.Instance);
+            private RoutingScope? pending;
+            private int pendingNumber;
+            private volatile bool hasRack;
+
+            internal AffinityScopeChain(RoutingScope scope)
+            {
+                this.AppendBuiltInPrefix(scope);
+            }
+
+            internal bool HasRack => this.hasRack;
+
+            internal void ObserveRack()
+            {
+                this.hasRack = true;
+            }
+
+            internal (RoutingScope Scope, int Number)? Get(int index, ScopeObservations observations)
+            {
+                lock (this.sync)
+                {
+                    while (index >= this.scopes.Count && this.pending != null)
+                    {
+                        // Failed getters leave the boundary unresolved for the next refresh.
+                        var fallback = observations.Get(this.pending, this.pendingNumber).GetFallback();
+                        this.pending = null;
+                        this.AppendBuiltInPrefix(fallback);
+                    }
+
+                    return index < this.scopes.Count ? this.scopes[index] : null;
+                }
+            }
+
+            private void AppendBuiltInPrefix(RoutingScope? scope)
+            {
+                while (scope != null)
+                {
+                    if (!IsBuiltInScope(scope))
+                    {
+                        this.occurrences.TryGetValue(scope, out var number);
+                        this.occurrences[scope] = number + 1;
+                        this.scopes.Add((scope, number));
+                        this.pending = scope;
+                        this.pendingNumber = number;
+                        return;
+                    }
+
+                    var derived = scope;
+                    if (scope is RackScope rack)
+                    {
+                        derived = DatacenterScope.Of(rack.Datacenter, null);
+                        this.hasRack = true;
+                    }
+
+                    if (this.operations.Add((derived is ClusterScope, derived.LocalNodesQuery)))
+                    {
+                        this.scopes.Add((derived, 0));
+                    }
+
+                    scope = scope.Fallback;
+                }
+            }
+        }
+
+        private sealed class ScopeObservations
+        {
+            private readonly Dictionary<RoutingScope, List<ScopeObservation>> scopes =
+                new Dictionary<RoutingScope, List<ScopeObservation>>(ReferenceEqualityComparer.Instance);
+
+            internal ScopeObservation Add(RoutingScope scope)
+            {
+                var visits = this.GetVisits(scope);
+                var observation = new ScopeObservation(scope);
+                visits.Add(observation);
+                return observation;
+            }
+
+            internal ScopeObservation Get(RoutingScope scope, int number)
+            {
+                var visits = this.GetVisits(scope);
+                while (visits.Count <= number)
+                {
+                    visits.Add(new ScopeObservation(scope));
+                }
+
+                return visits[number];
+            }
+
+            private List<ScopeObservation> GetVisits(RoutingScope scope)
+            {
+                if (!this.scopes.TryGetValue(scope, out var visits))
+                {
+                    visits = new List<ScopeObservation>();
+                    this.scopes.Add(scope, visits);
+                }
+
+                return visits;
+            }
+        }
+
+        private sealed class ScopeObservation
+        {
+            private readonly RoutingScope scope;
+            private readonly Lazy<string> query;
+            private bool fallbackCaptured;
+            private RoutingScope? fallback;
+
+            internal ScopeObservation(RoutingScope scope)
+            {
+                this.scope = scope;
+                this.query = new Lazy<string>(() => scope.LocalNodesQuery);
+            }
+
+            internal string Query => this.query.Value;
+
+            internal RoutingScope? GetFallback()
+            {
+                if (!this.fallbackCaptured)
+                {
+                    this.RecordFallback(this.scope.Fallback);
+                }
+
+                return this.fallback;
+            }
+
+            internal void RecordFallback(RoutingScope? observed)
+            {
+                this.fallback = observed;
+                this.fallbackCaptured = true;
             }
         }
     }

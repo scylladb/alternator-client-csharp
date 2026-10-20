@@ -451,22 +451,31 @@ AmazonDynamoDBClient client = AlternatorDynamoDBClient.builder()
     .build();
 ```
 
-When key-route affinity is enabled and the configured scope chain contains a rack
-restriction, qualifying writes use an additional affinity view. Its discovery
-chain is resolved once when affinity is enabled. It replaces each built-in rack
-restriction with its named datacenter and preserves all explicit fallbacks in order.
-Equivalent discovery operations share results within a refresh, including empty
-results; later refreshes retry them. Custom scope queries retain their behavior. For example, `rack(A,r1) → rack(B,r2) → cluster`
-becomes `DC(A) → DC(B) → cluster`; no implicit fallback is added. Named
-datacenters are discovered through `/localnodes?dc=<configured-dc>`.
+When an enabled affinity chain reaches a built-in rack restriction, qualifying
+writes use an additional datacenter view. The built-in prefix is resolved and
+deduplicated once at initialization or first activation; built-in-only chains
+resolve completely then. Opaque custom objects and runtime queries are preserved.
+Their fallback links resolve once when first needed, with successful links retained
+safely per occurrence across concurrent refreshes. Built-ins behind custom boundaries
+are deferred too. Repeated object identity does not truncate finite stateful chains;
+arbitrary custom fallback code may still not terminate when discovery needs it.
 
-After successful DC discovery, clients in different racks of that DC use the same
-membership for the same eligible key, including batch voting and retries. Other
-DCs remain excluded while the preferred DC is usable. Ordinary requests continue
-to use the configured routing scope. Existing startup and discovery-failure
-fallbacks remain available, including temporary rack or seed membership before
-successful discovery or during failures. Disabled affinity and chains without a
-rack restriction need no additional discovery.
+Each built-in rack becomes its named datacenter, preserving explicit fallback order.
+For example, `rack(A,r1) → rack(B,r2) → cluster` becomes `DC(A) → DC(B) → cluster`;
+no implicit fallback is added. Fixed built-in operations are deduplicated by query
+and seed aggregation behavior. Custom operations reuse current matching outcomes
+only within a refresh, including empty and failed discovery; later refreshes retry.
+Actual ordinary queries and selected fallback edges are shared per occurrence
+without additional custom metadata reads. Named datacenters use
+`/localnodes?dc=<configured-dc>` and retain first-usable scoped responses.
+
+With matching candidate membership, clients in different racks of the selected DC
+choose the same coordinator for the same eligible key, including batch voting and
+retries. Other DCs remain excluded while the preferred DC is usable. Ordinary
+requests retain their configured scope. Existing startup, refresh timing, health
+handling and failure fallbacks remain available, including temporary rack or seed
+membership before successful discovery or during failures. Disabled affinity and
+matching ordinary discovery need no additional view.
 
 ## AlternatorLiveNodes
 
