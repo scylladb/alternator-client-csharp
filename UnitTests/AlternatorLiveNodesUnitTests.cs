@@ -783,6 +783,90 @@ namespace ScyllaDB.Alternator
             Assert.That(handler.RequestedUris.Select(uri => uri.Query), Is.EqualTo(new[] { "?dc=custom" }));
         }
 
+        [TestCase(true, "rack.example.com")]
+        [TestCase(false, "datacenter.example.com")]
+        public void EquivalentCustomAndDatacenterScopesReuseDiscoveryTest(bool customFirst, string expectedNode)
+        {
+            var rack = RackScope.of("dc1", "rack1", null);
+            var custom = new TrackingRoutingScope(customFirst ? rack : null, () => "dc=dc1");
+            RoutingScope scope = customFirst ? custom : RackScope.of("dc1", "rack1", custom);
+            var handler = new ScopeAwareDiscoveryHttpMessageHandler(
+                customFirst ? new[] { "rack.example.com" } : Array.Empty<string>(),
+                customFirst ? Array.Empty<string>() : new[] { "datacenter.example.com" });
+            using var client = new HttpClient(handler);
+            var liveNodes = new AlternatorLiveNodes(
+                AlternatorConfig.builder()
+                    .withSeedHost("seed.example.com")
+                    .withScheme("http")
+                    .withPort(8043)
+                    .withRoutingScope(scope)
+                    .withKeyRouteAffinity(KeyRouteAffinity.ANY_WRITE)
+                    .build(),
+                client);
+
+            InvokeUpdateLiveNodes(liveNodes);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(
+                    handler.RequestedUris.Select(uri => uri.Query),
+                    Is.EqualTo(customFirst
+                        ? new[] { "?dc=dc1", "?dc=dc1&rack=rack1" }
+                        : new[] { "?dc=dc1&rack=rack1", "?dc=dc1" }));
+                Assert.That(liveNodes.GetLiveNodes().Select(node => node.Host), Is.EqualTo(new[] { expectedNode }));
+                Assert.That(
+                    LazyQueryPlan.sortedAffinityNodes(liveNodes).Select(node => node.Host),
+                    Is.EqualTo(new[] { customFirst ? "seed.example.com" : expectedNode }));
+            });
+        }
+
+        [Test]
+        public void CustomBareQueryDoesNotReplaceClusterSeedAggregationTest()
+        {
+            var bareRequests = 0;
+            using var server = new LocalNodesServer(
+                7,
+                request =>
+                {
+                    if (request.Query == string.Empty)
+                    {
+                        bareRequests++;
+                        return bareRequests <= 2 ? "[]"
+                            : request.Host.StartsWith("127.0.0.1:", StringComparison.Ordinal)
+                                ? "[\"127.0.0.4\"]" : "[\"127.0.0.5\"]";
+                    }
+
+                    return request.Query.Contains("&rack=") ? "[\"127.0.0.3\"]" : "[]";
+                });
+            var handler = new SocketsHttpHandler
+            {
+                UseProxy = false,
+            };
+            using var client = new HttpClient(handler);
+            var scope = new TrackingRoutingScope(RackScope.of("dc1", "rack1", ClusterScope.create()), () => string.Empty);
+            var liveNodes = new AlternatorLiveNodes(
+                AlternatorConfig.builder()
+                    .withSeedHosts(new[] { "127.0.0.1", "127.0.0.2" })
+                    .withScheme("http")
+                    .withPort(server.Port)
+                    .withRoutingScope(scope)
+                    .withKeyRouteAffinity(KeyRouteAffinity.ANY_WRITE)
+                    .build(),
+                client);
+
+            InvokeUpdateLiveNodes(liveNodes);
+            server.WaitForRequests();
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(bareRequests, Is.EqualTo(4));
+                Assert.That(liveNodes.GetLiveNodes().Select(node => node.Host), Is.EqualTo(new[] { "127.0.0.3" }));
+                Assert.That(
+                    LazyQueryPlan.sortedAffinityNodes(liveNodes).Select(node => node.Host),
+                    Is.EqualTo(new[] { "127.0.0.4", "127.0.0.5" }));
+            });
+        }
+
         [Test]
         public void CustomDiscoveryQueryIsEvaluatedOncePerRefreshTest()
         {
@@ -2144,14 +2228,19 @@ namespace ScyllaDB.Alternator
 
         private sealed class ScopeAwareDiscoveryHttpMessageHandler : HttpMessageHandler
         {
-            private readonly string rackNode;
+            private readonly string rackResponse;
             private readonly string datacenterResponse;
             private readonly System.Collections.Concurrent.ConcurrentQueue<Uri> requestedUris =
                 new System.Collections.Concurrent.ConcurrentQueue<Uri>();
 
             internal ScopeAwareDiscoveryHttpMessageHandler(string rackNode, IEnumerable<string> datacenterNodes)
+                : this(new[] { rackNode }, datacenterNodes)
             {
-                this.rackNode = rackNode;
+            }
+
+            internal ScopeAwareDiscoveryHttpMessageHandler(IEnumerable<string> rackNodes, IEnumerable<string> datacenterNodes)
+            {
+                this.rackResponse = System.Text.Json.JsonSerializer.Serialize(rackNodes);
                 this.datacenterResponse = System.Text.Json.JsonSerializer.Serialize(datacenterNodes);
             }
 
@@ -2167,7 +2256,7 @@ namespace ScyllaDB.Alternator
                 this.requestedUris.Enqueue(uri);
                 var responseBody = uri.Query == "?dc=dc1"
                     ? this.datacenterResponse
-                    : System.Text.Json.JsonSerializer.Serialize(new[] { this.rackNode });
+                    : this.rackResponse;
                 return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
                 {
                     Content = new StringContent(responseBody, Encoding.UTF8, "application/json"),

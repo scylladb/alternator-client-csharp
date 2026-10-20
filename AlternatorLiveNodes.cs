@@ -1139,7 +1139,7 @@ namespace ScyllaDB.Alternator
         {
             var scope = this.config.RoutingScope;
             Exception? lastException = null;
-            var discovered = new Dictionary<(Type, string), List<Uri>>();
+            var discovered = new Dictionary<(bool AggregateSeeds, string Query), List<Uri>>();
             while (scope != null)
             {
                 if (this.affinityEnabled && !this.requiresAffinityNodes && scope is RackScope)
@@ -1150,7 +1150,7 @@ namespace ScyllaDB.Alternator
                 try
                 {
                     var query = scope.LocalNodesQuery;
-                    var key = (scope.GetType(), query);
+                    var key = (AggregateSeeds: scope is ClusterScope, Query: query);
 
                     // Retain a failed attempt so affinity does not repeat it within this refresh.
                     discovered[key] = new List<Uri>();
@@ -1190,7 +1190,7 @@ namespace ScyllaDB.Alternator
             Logger.Warn("No nodes found in any routing scope, keeping existing node list");
         }
 
-        private void UpdateAffinityNodes(Dictionary<(Type, string), List<Uri>> discovered)
+        private void UpdateAffinityNodes(Dictionary<(bool AggregateSeeds, string Query), List<Uri>> discovered)
         {
             if (!this.requiresAffinityNodes)
             {
@@ -1205,7 +1205,7 @@ namespace ScyllaDB.Alternator
                     try
                     {
                         var query = scope.LocalNodesQuery;
-                        var key = (scope.GetType(), query);
+                        var key = (AggregateSeeds: scope is ClusterScope, Query: query);
                         if (!discovered.TryGetValue(key, out var nodes))
                         {
                             discovered[key] = new List<Uri>();
