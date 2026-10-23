@@ -2,6 +2,7 @@
 """Validate release inputs, verify publication bytes, and retain sanitized logs."""
 
 import base64
+from contextlib import contextmanager
 import hashlib
 import heapq
 import html
@@ -11,6 +12,7 @@ from pathlib import Path
 import re
 import selectors
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -92,7 +94,7 @@ def check_command(command):
     # Validate before launch; never echo option contents in diagnostics.
     for index, argument in enumerate(command[1:], 1):
         if (re.search(r"(?i)(?:^[-/](?:p|property):|^--?)(?:[^=]*(?:password|passphrase|token|secret|api[-_]?key|authorization)[^=]*)(?:=|$)", argument)
-                or re.match(r"(?i)^[-/](?:bl|binarylogger|fl|filelogger)(?:[:=0-9]|$)", argument)
+                or re.match(r"(?i)^[-/](?:bl|binarylogger|fl|filelogger|flp|fileloggerparameters|distributedfilelogger)(?:[:=0-9]|$)", argument)
                 or re.match(r"(?i)^(?:[-/]v(?:erbosity)?[:=]|--verbosity=)(?:diag(?:nostic)?|d(?:etailed)?)$", argument)
                 or argument.lower() in ("--debug", "-x")):
             raise Unsafe("debug logging or credential-bearing command properties are disabled")
@@ -185,14 +187,47 @@ def redact(data, forms):
     return bytes(output)
 
 
+@contextmanager
+def log_directory(logs):
+    """Pin a private log directory without following untrusted path components."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    directory = os.open("/", flags)
+    try:
+        for part in Path(os.path.abspath(logs)).parts[1:]:
+            parent = os.fstat(directory)
+            # Root-owned sticky directories such as /tmp protect our entries.
+            if (parent.st_uid not in (0, os.getuid())
+                    or (parent.st_mode & 0o022 and not (parent.st_uid == 0 and parent.st_mode & stat.S_ISVTX))):
+                raise OSError("unsafe log parent")
+            try:
+                os.mkdir(part, mode=0o700, dir_fd=directory)
+            except FileExistsError:
+                pass
+            child = os.open(part, flags, dir_fd=directory)
+            os.close(directory)
+            directory = child
+        owner = os.fstat(directory)
+        if owner.st_uid != os.getuid() or owner.st_mode & 0o077:
+            raise OSError("log directory must be private")
+        yield directory
+    finally:
+        os.close(directory)
+
+
 def write_logs(clean, logs):
     """Write only sanitized content or fixed diagnostics, tolerating broken outputs."""
     output_failed = False
     for name, data, stream in zip(("stdout", "stderr"), clean, (sys.stdout, sys.stderr)):
         try:
-            logs.mkdir(parents=True, exist_ok=True)
-            with (logs / (name + ".log")).open("ab") as output:
-                output.write(data)
+            with log_directory(logs) as directory:
+                descriptor = os.open(name + ".log", os.O_WRONLY | os.O_CREAT | os.O_APPEND
+                                     | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=directory)
+                with os.fdopen(descriptor, "ab") as output:
+                    owner = os.fstat(output.fileno())
+                    if (not stat.S_ISREG(owner.st_mode) or owner.st_uid != os.getuid()
+                            or owner.st_mode & 0o077 or owner.st_nlink != 1):
+                        raise OSError("log file must be private and singly linked")
+                    output.write(data)
         except OSError:
             output_failed = True
         try:
@@ -258,7 +293,7 @@ def capture(command, env, forms, logs, interrupted):
                 for buffer, ended in zip(buffers, complete)
             ]
         except Exception:
-            # Publishing has already exited. Withhold output without changing its status.
+            # The child command has already exited. Withhold output without changing its status.
             clean = [FAILED_LOG, FAILED_LOG]
         logs_started = True
         write_logs(clean, logs)

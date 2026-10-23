@@ -214,7 +214,7 @@ _release-build: _release-clean-outputs
 
 .PHONY: release-sign
 release-sign: release-check-user
-	(cd "$(PACKAGE_OUTPUT_DIR)" && sha256sum -- *.nupkg > SHA256SUMS)
+	(export LC_ALL=C; cd "$(PACKAGE_OUTPUT_DIR)" && sha256sum -- *.nupkg > SHA256SUMS)
 	python3 "$(RELEASE_SIGNING_HELPER)" exec python3 "$(RELEASE_SIGNING_HELPER)" sign-files "$(PACKAGE_OUTPUT_DIR)"/*.nupkg "$(PACKAGE_OUTPUT_DIR)/SHA256SUMS"
 
 .PHONY: test-release-signing

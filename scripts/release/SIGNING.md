@@ -63,7 +63,9 @@ Each release build removes old `.nupkg`, `.nupkg.asc`, `SHA256SUMS`, and
 Other files in the output directory are preserved.
 
 `release-sign` generates `SHA256SUMS`, then signs and verifies the packages and
-checksums in one batch. Existing signatures are verified without being overwritten.
+checksums in one batch. Checksum entries use the C locale's ASCII filename order,
+matching publication verification regardless of the caller's locale.
+Existing signatures are verified without being overwritten.
 `release-dry-run` prepares and signs outputs without uploading them. `release` also
 pushes packages only through the protected Actions workflow using NuGet trusted
 publishing. `NuGet/login` exchanges the job's GitHub OIDC identity for a short-lived
@@ -168,6 +170,12 @@ spooled to disk. Overflow, incomplete streams, and sanitization failures emit fi
 diagnostics. Log write failures preserve the command status. The workflow uploads
 only sanitized logs on success or failure. Set `RELEASE_LOG_DIR` locally to retain
 logs elsewhere (default `/tmp/alternator-release-logs`).
+Log directories and files are created with modes `0700` and `0600`. Existing log
+paths must be owned by the current user and private; symlinks, hard-linked files,
+and shared or foreign-owned parent directories are rejected (root-owned sticky
+parents such as `/tmp` are allowed). Already-private logs retain append behavior.
+For an older shared log directory, choose a new private `RELEASE_LOG_DIR`; rejected
+paths emit the fixed log-write diagnostic without changing the child command status.
 
 Release controls reject shell syntax, credential-bearing source URLs, and debug
 verbosity before launching the build. The guard is a credential/log safety boundary,

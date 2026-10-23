@@ -14,6 +14,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+import guard
 import signing
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -425,6 +426,21 @@ class SigningTests(unittest.TestCase):
             self.assertTrue(Path("nupkgs/ScyllaDB.Alternator.1.0.0.nupkg.asc").is_file())
             self.assertFalse((directory / "release-policy/nupkgs").exists())
             self.assertFalse(list(directory.glob("release-signing-*")))
+
+    def test_checksum_order_matches_verification_in_non_c_locale(self):
+        locales = signing.run(["locale", "-a"]).splitlines()
+        selected = next((name for name in locales if name.lower().startswith("en_us.")), None)
+        if selected is None:
+            self.skipTest("an en_US locale is needed to exercise non-C filename collation")
+        with self.make_repository(), patch.dict(os.environ, {"LC_ALL": selected, "PACKAGE_OUTPUT_DIR": "nupkgs"}):
+            Path("nupkgs").mkdir()
+            names = ["a.nupkg", "Z.nupkg", "_.nupkg", "+.nupkg", "-.nupkg", "A.nupkg"]
+            for name in names:
+                Path("nupkgs", name).write_bytes(name.encode())
+            signing.run(["make", "release-sign"])
+            entries = [line.split("  ", 1)[1] for line in Path("nupkgs/SHA256SUMS").read_text().splitlines()]
+            self.assertEqual(entries, sorted(names))
+            self.assertEqual([package.name for package in guard.verify_outputs()], sorted(names))
 
     def test_separate_release_workspace_signs_validated_bytes_with_trusted_tools(self):
         with self.make_repository(preserved=True) as validation:

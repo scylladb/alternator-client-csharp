@@ -69,6 +69,90 @@ class CaptureTests(unittest.TestCase):
             self.assertEqual(status, 11)
             self.assertEqual(logs.read_text(), "occupied")
 
+    def test_private_logs_append_with_private_permissions(self):
+        with tempfile.TemporaryDirectory() as temp:
+            logs = Path(temp) / "nested/logs"
+            with patch.object(guard.sys, "stdout"), patch.object(guard.sys, "stderr"):
+                guard.write_logs([b"first", b"error"], logs)
+                guard.write_logs([b"second", b"more"], logs)
+            self.assertEqual(logs.stat().st_mode & 0o777, 0o700)
+            self.assertEqual((logs / "stdout.log").stat().st_mode & 0o777, 0o600)
+            self.assertEqual((logs / "stdout.log").read_bytes(), b"firstsecond")
+            self.assertEqual((logs / "stderr.log").read_bytes(), b"errormore")
+
+    def test_unsafe_log_paths_never_redirect_writes_or_change_child_status(self):
+        for kind in ("directory-symlink", "parent-symlink", "file-symlink", "hardlink",
+                     "shared-directory", "shared-parent", "shared-file", "foreign-directory", "foreign-file"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temp:
+                base = Path(temp)
+                victim = base / "victim"
+                victim.write_bytes(b"unchanged")
+                victim.chmod(0o600)
+                logs = base / "logs"
+                logs.mkdir(mode=0o700)
+                foreign_inode = None
+                if kind == "directory-symlink":
+                    logs.rmdir()
+                    logs.symlink_to(base, target_is_directory=True)
+                elif kind == "parent-symlink":
+                    alias = base / "alias"
+                    alias.symlink_to(logs, target_is_directory=True)
+                    logs = alias / "nested"
+                elif kind == "file-symlink":
+                    (logs / "stdout.log").symlink_to(victim)
+                elif kind == "hardlink":
+                    os.link(victim, logs / "stdout.log")
+                elif kind in ("shared-directory", "shared-parent"):
+                    logs.chmod(0o777)
+                    if kind == "shared-parent":
+                        logs = logs / "nested"
+                elif kind in ("shared-file", "foreign-file"):
+                    output = logs / "stdout.log"
+                    output.write_bytes(b"unchanged")
+                    output.chmod(0o644 if kind == "shared-file" else 0o600)
+                    if kind == "foreign-file":
+                        foreign_inode = output.stat().st_ino
+                elif kind == "foreign-directory":
+                    foreign_inode = logs.stat().st_ino
+                original_stat = os.fstat
+                def observed_owner(descriptor):
+                    info = original_stat(descriptor)
+                    if info.st_ino == foreign_inode:
+                        values = list(info)
+                        values[4] = os.getuid() + 1
+                        return os.stat_result(values)
+                    return info
+                with patch.object(guard.os, "fstat", side_effect=observed_owner), \
+                        patch.object(guard.sys, "stdout"), patch.object(guard.sys, "stderr"), \
+                        patch.object(guard.os, "write") as diagnostic:
+                    with signing.session_signals() as interrupted:
+                        status = guard.capture([sys.executable, "-c", "print('new'); raise SystemExit(11)"],
+                                               os.environ, [], logs, interrupted)
+                self.assertEqual(status, 11)
+                self.assertEqual(victim.read_bytes(), b"unchanged")
+                diagnostic.assert_called_with(2, b"Sanitized release output could not be fully written; values withheld.\n")
+                if kind in ("shared-file", "foreign-file"):
+                    self.assertEqual(output.read_bytes(), b"unchanged")
+
+    def test_log_directory_descriptor_survives_path_replacement(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            logs, moved, victim = (base / name for name in ("logs", "moved", "victim"))
+            logs.mkdir(mode=0o700)
+            victim.mkdir(mode=0o700)
+            original_open = os.open
+            def replace_path(name, *args, **kwargs):
+                if name == "stdout.log":
+                    logs.rename(moved)
+                    logs.symlink_to(victim, target_is_directory=True)
+                return original_open(name, *args, **kwargs)
+            with patch.object(guard.os, "open", side_effect=replace_path), \
+                    patch.object(guard.sys, "stdout"), patch.object(guard.sys, "stderr"), \
+                    patch.object(guard.os, "write"):
+                guard.write_logs([b"retained", b"error"], logs)
+            self.assertEqual((moved / "stdout.log").read_bytes(), b"retained")
+            self.assertEqual(list(victim.iterdir()), [])
+
     def test_incomplete_stream_is_withheld(self):
         code = ("import subprocess, sys\n"
                 "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(.4)'])\n"
@@ -184,6 +268,8 @@ class PolicyTests(unittest.TestCase):
     def test_debug_and_credential_options_are_rejected(self):
         for args in (["--verbosity", "diagnostic"], ["-v:diag"],
                      ["-v:d"], ["-v", "d"], ["--verbosity=d"], ["-verbosity:d"], ["/v:D"],
+                     ["-flp:logfile=raw.log"], ["-fileLoggerParameters:LogFile=raw.log"],
+                     ["/distributedFileLogger"], ["/flp1:LogFile=raw.log"],
                      ["/bl:build.binlog"],
                      ["/fl"], ["/p:Password=private"], ["--api-key", "private"]):
             with self.subTest(args=args), self.assertRaises(guard.Unsafe):
