@@ -196,19 +196,7 @@ release-prepare: release-check-user
 
 .PHONY: release-check-user
 release-check-user:
-	@set -eu
-	if [[ "$${GITHUB_ACTIONS:-}" == true ]]; then
-		# The protected release environment authorizes Actions operators.
-		exit 0
-	fi
-	if ! user=$$(gh api user --jq .login); then
-		echo "Release requires GitHub user scylladb-publisher. Run gh auth login or gh auth switch." >&2
-		exit 1
-	fi
-	if [[ "$$user" != scylladb-publisher ]]; then
-		echo "Release requires GitHub user scylladb-publisher (current: $$user)." >&2
-		exit 1
-	fi
+	@python3 "$(RELEASE_GUARD)" check-user
 
 .PHONY: release-build _release-build _release-clean-outputs
 release-build: release-check-user

@@ -18,10 +18,13 @@ The `release-prepare`, `release-build`, `release-sign`, `release-push`, `release
 `release-dry-run`, `release-dry-run-summary`, and `checkout-one-commit-before` Make
 targets enforce the local operator policy before release work begins: the authenticated
 `gh` user must be `scylladb-publisher` (use `gh auth switch` if needed). In Actions,
-the protected `release` deployment environment authorizes operators and reruns;
-approved maintainers need not match the publisher account. The signer, NuGet
-publisher credentials, and release operator are separate identities. A manually set
-`GITHUB_ACTIONS=true` does not establish deployment approval or grant credentials.
+the triggering user must also be `scylladb-publisher`, including reruns and dry runs
+(`GITHUB_TRIGGERING_ACTOR`, falling back to `GITHUB_ACTOR`). The protected `release`
+environment additionally requires approval from `scylladb/drivers`. The guard owns
+this operator check for Make entrypoints and directly callable guard commands.
+The signer, NuGet publisher credentials, and release operator are separate identities.
+A manually set `GITHUB_ACTIONS=true` does not establish deployment approval or grant
+credentials.
 
 Each signing stage runs in a scoped `signing.py exec` session. The session imports
 only the protected signing subkey, checks that primary private material is absent,
@@ -67,17 +70,27 @@ credential immediately before publication. No stored NuGet API-key secret is use
 Even a direct `release-push` verifies every detached package signature,
 the checksum signature, and the exact complete package set before uploading anything.
 NuGet receives the temporary credential through its required CLI option inside the
-helper; Make never expands or prints its value. In Actions, building and signing run
-in separate steps; only signing receives GPG secrets.
-The workflow preserves the current Makefile, signing helper, log guard, and certificate
-outside the checkout before selecting an older release target. A branch input selects
-its tip; a tag input selects its preceding commit, preserving the existing rerun
+helper; Make never expands or prints its value. In Actions, validation, tests,
+packaging, and installation checks finish before protected approval is requested.
+The validation job has no release environment, signing secrets, publishing token, or
+OIDC permission. It preserves the current Makefile, signing helper, log guard, and
+certificate outside the checkout before selecting an older release target. A branch
+input selects its tip; a tag input selects its preceding commit, preserving the existing rerun
 behavior. Tags remain untouched, and this workflow never pushes prepared Git history.
 Selected targets must retain the .NET 8 `ScyllaDB.Alternator` package project policy.
 Always invoke the preserved Makefile with `make -f` after changing revisions; the
 checkout helper no longer overwrites historical files or deletes local tags.
-These scopes prevent direct credential inheritance; they do not provide separate
-runners or protection against arbitrary same-user persistence.
+A dependent release job runs on a fresh runner with the protected `release`
+environment. It checks out release tools at the immutable workflow revision
+(`github.sha`) and downloads only the exact validated package artifact by ID from
+this workflow run. Package bytes are treated as data: this runner never restores,
+builds, tests, installs, or executes selected-target code. It signs and verifies the
+unchanged packages, rechecks release blockers, then conditionally publishes. Dry runs
+still require approval and sign the packages, but skip NuGet login and upload.
+Artifact names include the run attempt; release-only reruns reuse the validation
+output ID and recheck the current triggering user. Local preparation still builds
+and signs on the same machine; its scopes prevent direct credential inheritance,
+but do not protect against arbitrary same-user persistence.
 
 Complex pre-release checks can run before preparation or against signed outputs
 after the session closes. Verification needs only the public certificate. Checks
@@ -105,10 +118,12 @@ gpg --fingerprint 1671E699F54C805D753B18E1E170B137B8BA59B2
 gpg --status-fd 1 --verify ARTIFACT.asc ARTIFACT
 ```
 
-Require exactly one matching `GOODSIG` and `VALIDSIG` pair with the signing
-fingerprint above and the expected primary fingerprint, and a successful GnuPG exit
-status. Reject expired or revoked keys/signatures, bad signatures, and error statuses
-even when a `VALIDSIG` is also present. The helper enforces these checks.
+Require a successful GnuPG exit status and exactly one `VALIDSIG` with the signing
+fingerprint above and the expected primary fingerprint. Reject `REVKEYSIG` and
+`KEYREVOKED` even when a `VALIDSIG` is also present. The helper enforces these checks
+and preserves GnuPG's existing expiry behavior: it does not separately reject expiry
+statuses or require `GOODSIG`. Successful verification does not establish that the
+key is currently unexpired; consumers may apply a stricter expiry policy.
 `git verify-tag --raw TAG` and `git verify-commit --raw COMMIT`
 provide the equivalent check for Git objects. Keyserver presence alone establishes
 neither trust nor the expected repository identity.
@@ -128,8 +143,8 @@ push treats version conflicts as warnings and continues with other packages.
 ## NuGet signatures
 
 The workflow signs the exact `.nupkg` bytes and retains packages, `SHA256SUMS`, and
-their `.asc` signatures in the `nuget-package` Actions artifact. OpenPGP signatures are detached and are not
-embedded in NuGet's native signature format. Assembly strong-name signing remains
+their `.asc` signatures in the `nuget-package-RUN_ATTEMPT` Actions artifact. OpenPGP
+signatures are detached and are not embedded in NuGet's native signature format. Assembly strong-name signing remains
 separate. This workflow does not create Git release commits or tags.
 
 These detached signatures verify the retained pre-publication package bytes.
@@ -166,17 +181,22 @@ disabled, administrator bypass disabled, and a custom branch rule permitting onl
 `main`. The `drivers` team has explicit read access to this repository so GitHub can
 use it as an environment reviewer.
 The branch rule applies to the workflow launch ref, including historical target runs.
-The publishing job declares this environment, covering signing and NuGet publication.
+Only the dependent release job declares this environment, so approval follows
+successful validation and covers signing and NuGet publication on a separate runner.
 YAML alone does not configure these protections or provision secrets. A runtime
-preflight checks approval, bypass, and branch rules before target checkout or signing;
-it fails closed if the environment is missing or configured differently.
+preflight checks that `scylladb/drivers` is the sole required reviewer, self-review
+and bypass are disabled, and the launch-ref rule allows only `main`. It runs before
+target checkout and again on the release runner; it fails closed if the environment
+is missing, has a different or additional reviewer, or is otherwise configured
+differently.
 
 Validate the protected signing-subkey export and nonempty single-line passphrase,
 then upload `GPG_PRIVATE_KEY` and `GPG_PASSPHRASE` to that environment
 through stdin or a secret-management API. Do not place values in shell command
 arguments or logs. Test an approved upload-free dry run launched from `main`, including
-a rerun by a different approved maintainer, then remove repository-level copies of
-the signing secrets after the environment-aware workflow is active.
+an allowed rerun by `scylladb-publisher` and rejection of other triggering users,
+then remove repository-level copies of the signing secrets after the environment-aware
+workflow is active.
 The environment contains `GPG_PRIVATE_KEY` and `GPG_PASSPHRASE`, uploaded through
 stdin from the validated repository-specific signing-subkey export and passphrase.
 An approved workflow dry run and repository-secret retirement remain rollout steps.
@@ -197,9 +217,12 @@ for policy registration and the short-lived credential exchange.
 ## Verification coverage
 
 `make test-release-signing` runs disposable-key/Git and real Make tests with a .NET
-substitute, plus guard subprocess tests. It covers separate Actions operators,
-unsigned/tampered/incompletely listed publication inputs, strict signature status,
-post-use protection checks, cleanup failures, cancellation, and sanitized output.
+substitute, plus guard subprocess tests. It covers publisher authorization on
+initial runs and reruns, the sole drivers reviewer, validation/approval wiring,
+separate-workspace signing of unchanged package data with trusted tools,
+unsigned/tampered/incompletely listed publication inputs, pinned signer and revocation
+checks with preserved expiry behavior, post-use protection checks, cleanup failures,
+cancellation, and sanitized output.
 The `Release signing` PR CI workflow includes both signing and guard tests.
 
 A full C# rehearsal uses the real .NET SDK to pack and install the package and then

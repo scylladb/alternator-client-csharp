@@ -32,8 +32,10 @@ class Unsafe(ValueError):
 
 
 def authorize_operator():
-    # Deployment approval is enforced by the workflow/environment, not actor equality.
     if os.environ.get("GITHUB_ACTIONS") == "true":
+        actor = os.environ.get("GITHUB_TRIGGERING_ACTOR") or os.environ.get("GITHUB_ACTOR", "")
+        if actor != "scylladb-publisher":
+            raise Unsafe("Actions release requires the configured publisher triggering user")
         return
     if signing.run(["gh", "api", "user", "--jq", ".login"]).strip() != "scylladb-publisher":
         raise Unsafe("local publication requires the configured publisher account")
@@ -47,13 +49,17 @@ def check_environment():
     environment = json.loads(signing.run(["gh", "api", endpoint]))
     approvals = [rule for rule in environment.get("protection_rules", [])
                  if rule.get("type") == "required_reviewers"]
+    reviewers = approvals[0].get("reviewers", []) if len(approvals) == 1 else []
+    reviewer = reviewers[0].get("reviewer", {}) if len(reviewers) == 1 else {}
     policy = environment.get("deployment_branch_policy") or {}
     if (environment.get("can_admins_bypass") is not False or len(approvals) != 1
             or approvals[0].get("prevent_self_review") is not True
-            or not any(reviewer.get("type") == "Team" for reviewer in approvals[0].get("reviewers", []))
+            or len(reviewers) != 1 or reviewers[0].get("type") != "Team"
+            or reviewer.get("slug") != "drivers"
+            or reviewer.get("html_url") != "https://github.com/orgs/scylladb/teams/drivers"
             or policy.get("custom_branch_policies") is not True
             or policy.get("protected_branches") is not False):
-        raise Unsafe("release environment requires team approval, no self-review/bypass, and main-only launch refs")
+        raise Unsafe("release environment requires only scylladb/drivers approval, no self-review/bypass, and main-only launch refs")
     # A second page means more allowed branches than the one supported here.
     rules = json.loads(signing.run(["gh", "api", endpoint + "/deployment-branch-policies?per_page=100"]))
     branches = rules.get("branch_policies", [])
@@ -344,11 +350,13 @@ def checkout_target():
 def main():
     try:
         with signing.session_signals() as interrupted:
+            authorize_operator()
+            if sys.argv[1:] == ["check-user"]:
+                return 0
             if sys.argv[1:] == ["check-environment"]:
                 check_environment()
                 return 0
             if sys.argv[1:] == ["checkout-target"]:
-                authorize_operator()
                 checkout_target()
                 return 0
             check_inputs()
@@ -359,7 +367,6 @@ def main():
             if sys.argv[1:] == ["publish"]:
                 # Independently callable publication requires public verification;
                 # it never imports private signing credentials.
-                authorize_operator()
                 packages = verify_outputs()
                 key = os.environ.get("NUGET_PUBLISH_TOKEN", "")
                 if os.environ.get("GITHUB_ACTIONS") != "true":
@@ -381,7 +388,7 @@ def main():
                 env = signing.build_environment()
                 env["DOTNET_FORMAT_VERBOSITY"] = "normal"
                 return capture(sys.argv[2:], env, secret_forms(os.environ), logs, interrupted)
-            raise Unsafe("expected run COMMAND, publish, check-target, checkout-target, or check-environment")
+            raise Unsafe("expected run COMMAND, publish, check-user, check-target, checkout-target, or check-environment")
     except (Unsafe, signing.SigningError):
         print("Release safety check failed; values withheld.", file=sys.stderr)
     except Exception:

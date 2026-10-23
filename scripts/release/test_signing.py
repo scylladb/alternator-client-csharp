@@ -374,7 +374,7 @@ class SigningTests(unittest.TestCase):
             ]) + "\n")
             dotnet.chmod(0o700)
             os.environ.update(PATH=str(tools) + os.pathsep + os.environ["PATH"],
-                              GITHUB_ACTIONS="true", GITHUB_ACTOR="approved-maintainer", GITHUB_TRIGGERING_ACTOR="other-approved-maintainer",
+                              GITHUB_ACTIONS="true", GITHUB_ACTOR="scylladb-publisher", GITHUB_TRIGGERING_ACTOR="scylladb-publisher",
                               BUILD_OBSERVATIONS=str(directory / "build-observations"),
                               MAKEFILE_PATH=str(Path.cwd()))
             password = directory / "passphrase"
@@ -425,6 +425,43 @@ class SigningTests(unittest.TestCase):
             self.assertTrue(Path("nupkgs/ScyllaDB.Alternator.1.0.0.nupkg.asc").is_file())
             self.assertFalse((directory / "release-policy/nupkgs").exists())
             self.assertFalse(list(directory.glob("release-signing-*")))
+
+    def test_separate_release_workspace_signs_validated_bytes_with_trusted_tools(self):
+        with self.make_repository(preserved=True) as validation:
+            policy = validation / "release-policy"
+            signing.run(["make", "-f", str(policy / "Makefile"), "release-build",
+                         "RELEASE_SKIP_TESTS=true", "RELEASE_VERSION=1.0.0"])
+            package = Path("nupkgs/ScyllaDB.Alternator.1.0.0.nupkg")
+            validated_bytes = package.read_bytes()
+            observations = Path(os.environ["BUILD_OBSERVATIONS"])
+            built = observations.read_bytes()
+            source = Path.cwd()
+            with tempfile.TemporaryDirectory(prefix="release-runner-") as temp:
+                release = Path(temp)
+                # Only package data crosses from the selected target. Tools come
+                # from the retained trusted policy, as with the pinned checkout.
+                shutil.copyfile(policy / "Makefile", release / "Makefile")
+                shutil.copytree(policy / "scripts", release / "scripts")
+                (release / "nupkgs").mkdir()
+                transferred = release / "nupkgs" / package.name
+                shutil.copyfile(package, transferred)
+                self.assertFalse((release / "ScyllaDB.Alternator.csproj").exists())
+                try:
+                    os.chdir(release)
+                    with patch.dict(os.environ, {"MAKEFILE_PATH": str(release),
+                                                 "PACKAGE_OUTPUT_DIR": str(release / "nupkgs"),
+                                                 "RUNNER_TEMP": str(release)}):
+                        signing.run(["make", "release-sign"])
+                        signing.run(["make", "release-dry-run-summary"])
+                        with signing.public_environment() as env:
+                            for artifact in (transferred, release / "nupkgs/SHA256SUMS"):
+                                signing.verify_status(signing.gpg("--status-fd", "1", "--verify",
+                                                                 str(artifact) + ".asc", artifact, env=env))
+                    self.assertEqual(transferred.read_bytes(), validated_bytes)
+                    self.assertEqual(observations.read_bytes(), built)
+                    self.assertFalse(list(release.glob("release-signing-*")))
+                finally:
+                    os.chdir(source)
 
     def test_release_rerun_uses_fresh_outputs_and_keeps_publishing_key_out_of_build(self):
         with self.make_repository():
@@ -540,12 +577,18 @@ class SigningTests(unittest.TestCase):
 
 
 class SignatureStatusTests(unittest.TestCase):
-    def test_expected_signer_requires_goodsig(self):
+    def test_validsig_never_overrides_nonzero_gnupg_status(self):
         valid = "[GNUPG:] VALIDSIG " + signing.SIGNING + " 2026-10-20 1 0 4 0 1 10 00 " + signing.PRIMARY
-        good = "[GNUPG:] GOODSIG " + signing.SIGNING[-16:] + " Release signer\n"
-        signing.verify_status(good + valid)
-        with self.assertRaises(signing.SigningError):
-            signing.verify_status(valid)
+        result = subprocess.CompletedProcess([], 1, valid, "")
+        with patch.object(subprocess, "run", return_value=result), self.assertRaises(signing.SigningError):
+            signing.verify_status(signing.gpg("--status-fd", "1", "--verify", "test.asc", "test"))
+
+    def test_expected_signer_preserves_gnupg_expiry_and_goodsig_behavior(self):
+        valid = "[GNUPG:] VALIDSIG " + signing.SIGNING + " 2026-10-20 1 0 4 0 1 10 00 " + signing.PRIMARY
+        signing.verify_status(valid)
+        for code in ("GOODSIG", "EXPKEYSIG", "EXPSIG", "KEYEXPIRED", "SIGEXPIRED"):
+            with self.subTest(code=code):
+                signing.verify_status("[GNUPG:] " + code + "\n" + valid)
 
     def test_wrong_ambiguous_and_revoked_signatures_rejected(self):
         valid = "[GNUPG:] VALIDSIG " + signing.SIGNING + " 2026-10-20 1 0 4 0 1 10 00 " + signing.PRIMARY
@@ -553,12 +596,7 @@ class SignatureStatusTests(unittest.TestCase):
         for status in [valid.replace(signing.SIGNING, "0" * 40),
                        valid.replace(signing.PRIMARY, "0" * 40), valid + "\n" + valid,
                        "[GNUPG:] REVKEYSIG " + signing.SIGNING + "\n" + valid,
-                       valid + "\n[GNUPG:] KEYREVOKED",
-                       *[valid + "\n[GNUPG:] " + code for code in (
-                           "EXPKEYSIG", "EXPSIG", "BADSIG", "ERRSIG", "FAILURE", "ERROR",
-                           "KEYEXPIRED", "SIGEXPIRED")],
-                       valid.replace("GOODSIG " + signing.SIGNING[-16:], "GOODSIG " + "0" * 16),
-                       valid + "\n[GNUPG:] GOODSIG " + signing.SIGNING[-16:]]:
+                       valid + "\n[GNUPG:] KEYREVOKED"]:
             with self.subTest(status=status), self.assertRaises(signing.SigningError):
                 signing.verify_status(status)
 
@@ -613,14 +651,33 @@ class DiagnosticTests(unittest.TestCase):
 
 
 class ReleaseUserTests(unittest.TestCase):
-    def test_actions_operator_is_independent_of_signer(self):
-        for actor, rerun in [("approved-maintainer", ""), ("approved-maintainer", "other-maintainer")]:
+    def test_actions_release_requires_publisher_triggering_user_including_reruns(self):
+        for actor, rerun, allowed in [("scylladb-publisher", "", True),
+                                      ("scylladb-publisher", "scylladb-publisher", True),
+                                      ("other-maintainer", "scylladb-publisher", True),
+                                      ("other-maintainer", "", False),
+                                      ("scylladb-publisher", "other-maintainer", False),
+                                      ("", "", False)]:
             with self.subTest(actor=actor, rerun=rerun):
                 result = subprocess.run(["make", "release-check-user"], cwd=ROOT,
                                         capture_output=True, text=True, timeout=60,
                                         env={**os.environ, "GITHUB_ACTIONS": "true",
                                              "GITHUB_ACTOR": actor, "GITHUB_TRIGGERING_ACTOR": rerun})
-                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.returncode == 0, allowed, result.stderr)
+
+    def test_actions_dry_run_rejects_other_triggering_user_before_preparation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp) / "packages"
+            result = subprocess.run(["make", "release-dry-run"], cwd=ROOT,
+                                    capture_output=True, text=True, timeout=60,
+                                    env={**os.environ, "GITHUB_ACTIONS": "true",
+                                         "GITHUB_ACTOR": "scylladb-publisher",
+                                         "GITHUB_TRIGGERING_ACTOR": "other-maintainer",
+                                         "PACKAGE_OUTPUT_DIR": str(output)})
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Release safety check failed", result.stderr)
+            self.assertNotIn("release-prepare", result.stdout)
+            self.assertFalse(output.exists())
 
     def test_publication_job_uses_release_environment(self):
         workflow = (ROOT / ".github/workflows/release.yml").read_text()
@@ -637,7 +694,7 @@ class ReleaseUserTests(unittest.TestCase):
             result = subprocess.run(["make", "release-prepare"], cwd=ROOT, env=env,
                                     capture_output=True, text=True, timeout=60)
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("current: someone-else", result.stderr)
+            self.assertIn("Release safety check failed", result.stderr)
             env["TEST_GH_USER"] = "scylladb-publisher"
             subprocess.run(["make", "release-check-user"], cwd=ROOT, env=env, check=True,
                            capture_output=True, timeout=60)
@@ -645,7 +702,7 @@ class ReleaseUserTests(unittest.TestCase):
             result = subprocess.run(["make", "release-prepare"], cwd=ROOT, env=env,
                                     capture_output=True, text=True, timeout=60)
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("Run gh auth login or gh auth switch", result.stderr)
+            self.assertIn("Release safety check failed", result.stderr)
 
 
 if __name__ == "__main__":

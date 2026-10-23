@@ -81,6 +81,20 @@ class CaptureTests(unittest.TestCase):
 
 
 class PolicyTests(unittest.TestCase):
+    def test_direct_guard_enforces_actions_triggering_user_before_any_work(self):
+        for command in (["check-user"], ["check-environment"], ["checkout-target"],
+                        ["check-target"], ["run", "unused"], ["publish"]):
+            for actor, triggering in (("other", ""), ("scylladb-publisher", "other"), ("", "")):
+                with self.subTest(command=command, actor=actor, triggering=triggering), \
+                        patch.dict(os.environ, {"GITHUB_ACTIONS": "true", "GITHUB_ACTOR": actor,
+                                               "GITHUB_TRIGGERING_ACTOR": triggering}, clear=True), \
+                        patch.object(sys, "argv", ["guard.py", *command]), \
+                        patch.object(signing, "run") as run, \
+                        patch.object(guard, "capture") as capture, redirect_stderr(StringIO()):
+                    self.assertEqual(guard.main(), 2)
+                    run.assert_not_called()
+                    capture.assert_not_called()
+
     def test_publication_requires_workflow_token_without_legacy_fallback(self):
         for env in ({"GITHUB_ACTIONS": "true", "NUGET_API_KEY": "legacy-key"},
                     {"GITHUB_ACTIONS": "true", "NUGET_PUBLISH_TOKEN": ""},
@@ -110,15 +124,56 @@ class PolicyTests(unittest.TestCase):
         self.assertLess(workflow.index("Recheck for open release blockers"),
                         workflow.index("Authenticate NuGet trusted publisher"))
 
+    def test_validation_precedes_protected_release_and_transfers_only_package_data(self):
+        workflow = (Path(__file__).resolve().parents[2] / ".github/workflows/release.yml").read_text()
+        validation, release = workflow.split("  release:\n")
+        self.assertIn("  validate:\n", validation)
+        self.assertIn("    needs: validate\n", release)
+        self.assertEqual(workflow.count("    runs-on: ubuntu-latest\n"), 2)
+        self.assertNotIn("environment:", validation)
+        self.assertIn("      actions: read\n", validation)
+        for capability in ("secrets.", "id-token:", "NUGET_PUBLISH_TOKEN", "NuGet/login"):
+            self.assertNotIn(capability, validation)
+        self.assertIn("    environment: release\n", release)
+        self.assertIn("          ref: ${{ github.sha }}\n", release)
+        self.assertNotIn("inputs.target-tag", release)
+        for executable in ("release-build", "release-prepare", "dotnet restore", "dotnet test",
+                           "try-get", "release-policy", "checkout-one-commit-before"):
+            self.assertNotIn(executable, release)
+        upload = validation.split("      - name: Upload validated packages\n")[1].split("      - name:")[0]
+        self.assertIn("          path: nupkgs/*.nupkg\n", upload)
+        self.assertIn("          if-no-files-found: error\n", upload)
+        self.assertIn("      package-artifact-id: ${{ steps.packages.outputs.artifact-id }}", validation)
+        self.assertIn("artifact-ids: ${{ needs.validate.outputs.package-artifact-id }}", release)
+        self.assertIn("          merge-multiple: true\n", release)
+        download = release.split("      - name: Download validated packages as data\n")[1].split("      - name:")[0]
+        # Without run-id/github-token overrides the action resolves IDs only
+        # among this run's artifacts; the ID is the validation job's output.
+        self.assertNotIn("run-id:", download)
+        self.assertNotIn("github-token:", download)
+        signing_step = release.split("      - name: Sign and verify NuGet packages and checksums\n")[1].split("      - name:")[0]
+        self.assertIn("run: make release-sign", signing_step)
+        self.assertNotIn("if:", signing_step)
+        dry_run = release.split("      - name: Perform release dry-run\n")[1].split("      - name:")[0]
+        self.assertIn("if: inputs.dry-run == true", dry_run)
+        self.assertIn("run: make release-dry-run-summary", dry_run)
+        self.assertIn("name: validated-packages-${{ github.run_attempt }}", upload)
+        self.assertIn("name: nuget-package-${{ github.run_attempt }}", release)
+        self.assertLess(validation.index("Preserve repository signing policy"),
+                        validation.index("Checkout selected release target"))
+
     def test_unsafe_inputs_are_rejected_without_echoing_values(self):
         for name, value in [("RELEASE_VERSION", '1.0.0$(touch unsafe)'),
                             ("PACKAGE_OUTPUT_DIR", 'nupkgs; touch unsafe'),
                             ("NUGET_SOURCE", 'https://user:secret@example.invalid/index.json'),
                             ("DOTNET_VERBOSITY", 'diagnostic'), ("MSBUILDDEBUGENGINE", '1')]:
-            with self.subTest(name=name), patch.dict(os.environ, {name: value}, clear=True):
+            with self.subTest(name=name), patch.dict(os.environ, {
+                    name: value, "GITHUB_ACTIONS": "true", "GITHUB_ACTOR": "scylladb-publisher"}, clear=True):
                 output = StringIO()
-                with patch.object(sys, "argv", ["guard.py", "run", "unused"]), redirect_stderr(output):
+                with patch.object(sys, "argv", ["guard.py", "run", "unused"]), \
+                        patch.object(guard, "capture") as capture, redirect_stderr(output):
                     self.assertEqual(guard.main(), 2)
+                    capture.assert_not_called()
                 self.assertNotIn(value, output.getvalue())
 
     def test_debug_and_credential_options_are_rejected(self):
@@ -131,7 +186,8 @@ class PolicyTests(unittest.TestCase):
     def test_protected_environment_fails_closed_on_weaker_settings(self):
         environment = {"can_admins_bypass": False,
                        "protection_rules": [{"type": "required_reviewers", "prevent_self_review": True,
-                                             "reviewers": [{"type": "Team"}]}],
+                                             "reviewers": [{"type": "Team", "reviewer": {
+                                                 "slug": "drivers", "html_url": "https://github.com/orgs/scylladb/teams/drivers"}}]}],
                        "deployment_branch_policy": {"protected_branches": False, "custom_branch_policies": True}}
         branches = {"total_count": 1, "branch_policies": [{"name": "main", "type": "branch"}]}
         with patch.dict(os.environ, {"GITHUB_REPOSITORY": "owner/repo"}, clear=True):
@@ -146,6 +202,15 @@ class PolicyTests(unittest.TestCase):
             for name in ("prevent_self_review", "reviewers"):
                 candidate = copy.deepcopy(environment)
                 candidate["protection_rules"][0][name] = False if name == "prevent_self_review" else []
+                invalid.append(candidate)
+            for reviewers in ([{"type": "Team", "reviewer": {"slug": "other"}}],
+                              [{"type": "User", "reviewer": {"login": "drivers"}}],
+                              [{"type": "Team", "reviewer": {"slug": "drivers",
+                                "html_url": "https://github.com/orgs/other/teams/drivers"}}],
+                              environment["protection_rules"][0]["reviewers"] * 2,
+                              environment["protection_rules"][0]["reviewers"] + [{"type": "User"}]):
+                candidate = copy.deepcopy(environment)
+                candidate["protection_rules"][0]["reviewers"] = reviewers
                 invalid.append(candidate)
             for candidate in invalid:
                 with self.subTest(environment=candidate), \
