@@ -2,9 +2,14 @@ SHELL := bash
 .ONESHELL:
 .SHELLFLAGS := -eo pipefail -c
 
-MAKEFILE_PATH := $(abspath $(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
+MAKEFILE_PATH ?= $(abspath $(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
+RELEASE_MAKEFILE ?= $(abspath $(firstword $(MAKEFILE_LIST)))
+RELEASE_GUARD ?= $(dir $(RELEASE_MAKEFILE))scripts/release/guard.py
+RELEASE_SIGNING_HELPER ?= $(dir $(RELEASE_MAKEFILE))scripts/release/signing.py
+RELEASE_HISTORY ?= $(dir $(RELEASE_MAKEFILE))scripts/release/history.py
 
 DOTNET_VERBOSITY := normal
+DOTNET_FORMAT_VERBOSITY ?= diagnostic
 ifdef IS_CICD
 	DOTNET_VERBOSITY := minimal
 endif
@@ -23,9 +28,11 @@ SCYLLA_CCM_PATH ?= $(PINNED_SCYLLA_CCM_PATH)
 SCYLLA_VERSION ?= release:2025.2
 PACKAGE_OUTPUT_DIR ?= $(MAKEFILE_PATH)/nupkgs
 NUGET_SOURCE ?= https://api.nuget.org/v3/index.json
-NUGET_API_KEY ?=
 RELEASE_SKIP_TESTS ?= false
 RELEASE_VERSION ?=
+RELEASE_NEXT_VERSION ?=
+export MAKEFILE_PATH RELEASE_MAKEFILE RELEASE_SIGNING_HELPER RELEASE_GUARD RELEASE_HISTORY
+export RELEASE_VERSION RELEASE_NEXT_VERSION RELEASE_SKIP_TESTS PACKAGE_OUTPUT_DIR NUGET_SOURCE
 PACK_VERSION_ARGS :=
 ifneq ($(strip $(RELEASE_VERSION)),)
 	PACK_VERSION_ARGS := /p:Version=$(RELEASE_VERSION) /p:PackageVersion=$(RELEASE_VERSION)
@@ -166,17 +173,17 @@ fix: fix-dotnet-format
 
 .PHONY: check-license-headers
 check-license-headers:
-	dotnet format analyzers --verify-no-changes --diagnostics SA1633 SA1636 SA1638 --severity warn --verbosity diagnostic ScyllaDB.Alternator.csproj
-	dotnet format analyzers --verify-no-changes --diagnostics SA1633 SA1636 SA1638 --severity warn --verbosity diagnostic UnitTests/ScyllaDB.Alternator.Test.csproj
-	dotnet format analyzers --verify-no-changes --diagnostics SA1633 SA1636 SA1638 --severity warn --verbosity diagnostic IntegrationTests/ScyllaDB.Alternator.Test.csproj
+	dotnet format analyzers --verify-no-changes --diagnostics SA1633 SA1636 SA1638 --severity warn --verbosity $(DOTNET_FORMAT_VERBOSITY) ScyllaDB.Alternator.csproj
+	dotnet format analyzers --verify-no-changes --diagnostics SA1633 SA1636 SA1638 --severity warn --verbosity $(DOTNET_FORMAT_VERBOSITY) UnitTests/ScyllaDB.Alternator.Test.csproj
+	dotnet format analyzers --verify-no-changes --diagnostics SA1633 SA1636 SA1638 --severity warn --verbosity $(DOTNET_FORMAT_VERBOSITY) IntegrationTests/ScyllaDB.Alternator.Test.csproj
 
 .PHONY: check-dotnet-format
 check-dotnet-format:
-	dotnet format --verify-no-changes --severity warn --verbosity diagnostic ScyllaDB.Alternator.csproj
+	dotnet format --verify-no-changes --severity warn --verbosity $(DOTNET_FORMAT_VERBOSITY) ScyllaDB.Alternator.csproj
 
 .PHONY: fix-dotnet-format
 fix-dotnet-format:
-	dotnet format --severity warn --verbosity diagnostic ScyllaDB.Alternator.csproj
+	dotnet format --severity warn --verbosity $(DOTNET_FORMAT_VERBOSITY) ScyllaDB.Alternator.csproj
 
 .PHONY: test
 test: build check test-unit test-infrastructure test-integration
@@ -185,45 +192,74 @@ test: build check test-unit test-infrastructure test-integration
 test-all: test
 
 .PHONY: release-prepare
-release-prepare:
+release-prepare: release-check-user
+	+$(MAKE) -f "$(RELEASE_MAKEFILE)" release-build
+	+$(MAKE) -f "$(RELEASE_MAKEFILE)" release-history
+	+$(MAKE) -f "$(RELEASE_MAKEFILE)" release-sign
+
+.PHONY: release-check-user
+release-check-user:
+	@python3 "$(RELEASE_GUARD)" check-user
+
+.PHONY: release-build _release-build _release-clean-outputs
+release-build: release-check-user
+	@python3 "$(RELEASE_HISTORY)" plan
+	+python3 "$(RELEASE_GUARD)" run $(MAKE) -f "$(RELEASE_MAKEFILE)" _release-build
+
+_release-clean-outputs: release-check-user
+	@: "$${PACKAGE_OUTPUT_DIR:?PACKAGE_OUTPUT_DIR must not be empty}"
+	rm -f -- "$$PACKAGE_OUTPUT_DIR"/*.nupkg "$$PACKAGE_OUTPUT_DIR"/*.nupkg.asc "$$PACKAGE_OUTPUT_DIR/SHA256SUMS" "$$PACKAGE_OUTPUT_DIR/SHA256SUMS.asc" "$$PACKAGE_OUTPUT_DIR/release-history.json.asc"
+
+_release-build: _release-clean-outputs
+	export RELEASE_VERSION=$$(python3 "$(RELEASE_HISTORY)" version)
+	$(MAKE) -f "$(RELEASE_MAKEFILE)" build check
 	@if [[ "$(RELEASE_SKIP_TESTS)" != "true" ]] && [[ "$(RELEASE_SKIP_TESTS)" != "1" ]]; then \
-		$(MAKE) build check test-unit; \
+		$(MAKE) -f "$(RELEASE_MAKEFILE)" test-unit; \
 	fi
-	$(MAKE) try-get
+	$(MAKE) -f "$(RELEASE_MAKEFILE)" try-get
+
+.PHONY: release-sign
+release-sign: release-check-user
+	python3 "$(RELEASE_HISTORY)" verify
+	(export LC_ALL=C; cd "$(PACKAGE_OUTPUT_DIR)" && sha256sum -- *.nupkg release-history.bundle release-history.json > SHA256SUMS)
+	python3 "$(RELEASE_SIGNING_HELPER)" exec python3 "$(RELEASE_SIGNING_HELPER)" sign-files "$(PACKAGE_OUTPUT_DIR)"/*.nupkg "$(PACKAGE_OUTPUT_DIR)/release-history.json" "$(PACKAGE_OUTPUT_DIR)/SHA256SUMS"
+
+.PHONY: release-history release-verify-history release-push-history
+release-history: release-check-user
+	python3 "$(RELEASE_SIGNING_HELPER)" exec python3 "$(RELEASE_HISTORY)" create
+
+release-verify-history: release-check-user
+	python3 "$(RELEASE_HISTORY)" verify
+
+release-push-history: release-check-user
+	python3 "$(RELEASE_HISTORY)" push
+
+.PHONY: test-release-signing
+test-release-signing:
+	python3 -m unittest discover -s scripts/release -p 'test_*.py' -v
 
 .PHONY: release-push
-release-push:
-	@if [[ "$(NUGET_API_KEY)" == "" ]]; then \
-		echo "NUGET_API_KEY is empty, can't continue"; \
-		exit 1; \
-	fi
-	dotnet nuget push $(PACKAGE_OUTPUT_DIR)/*.nupkg --api-key "$(NUGET_API_KEY)" --source "$(NUGET_SOURCE)" --skip-duplicate
+release-push: release-check-user
+	@python3 "$(RELEASE_GUARD)" publish
 
 .PHONY: release
-release: release-prepare release-push
+release: release-check-user
+	+$(MAKE) -f "$(RELEASE_MAKEFILE)" release-prepare
+	+$(MAKE) -f "$(RELEASE_MAKEFILE)" release-push
 
 .PHONY: release-dry-run-summary
-release-dry-run-summary:
+release-dry-run-summary: release-check-user
 	@echo "Dry-run: NuGet package was built but not pushed"
 	ls -l $(PACKAGE_OUTPUT_DIR)
 
 .PHONY: release-dry-run
-release-dry-run: release-prepare release-dry-run-summary
+release-dry-run: release-check-user
+	+$(MAKE) -f "$(RELEASE_MAKEFILE)" release-prepare
+	+$(MAKE) -f "$(RELEASE_MAKEFILE)" release-dry-run-summary
 
 .PHONY: checkout-one-commit-before
-checkout-one-commit-before:
-	@if [[ "$(RELEASE_TARGET_TAG)" != "" ]] && [[ "$(RELEASE_TARGET_TAG)" != "main" ]]; then \
-		git fetch --tags --prune --unshallow || git fetch --tags --prune || true; \
-		if git rev-parse -q --verify "refs/tags/$(RELEASE_TARGET_TAG)" >/dev/null; then \
-			echo "Checking out one commit before $(RELEASE_TARGET_TAG)"; \
-			cp -f Makefile /tmp/tmp-Makefile; \
-			git checkout "$(RELEASE_TARGET_TAG)~1"; \
-			git tag -d "$(RELEASE_TARGET_TAG)" || true; \
-			mv -f /tmp/tmp-Makefile ./Makefile; \
-		else \
-			echo "$(RELEASE_TARGET_TAG) is not a tag; leaving checkout unchanged"; \
-		fi; \
-	fi
+checkout-one-commit-before: release-check-user
+	@python3 "$(RELEASE_GUARD)" checkout-target
 
 .PHONY: test-unit
 test-unit:

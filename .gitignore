@@ -62,3 +62,7 @@ build/scylladb.snk
 nupkgs/
 IntegrationTests/scylla/*.crt
 IntegrationTests/scylla/*.key
+
+# Release signing source is not a Visual Studio build output.
+!/scripts/release/
+scripts/release/__pycache__/
