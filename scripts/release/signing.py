@@ -106,10 +106,11 @@ def build_environment():
 def verify_status(status):
     records = [line.split() for line in status.splitlines() if line.startswith("[GNUPG:] ")]
     signatures = [row for row in records if len(row) > 1 and row[1] == "VALIDSIG"]
-    # GnuPG's exit status already gates success at the call sites. Preserve its
-    # expiry behavior while explicitly rejecting revocation even with VALIDSIG.
-    rejected = {"REVKEYSIG", "KEYREVOKED"}
-    if (len(signatures) != 1 or len(signatures[0]) != 12
+    good = [row for row in records if len(row) > 1 and row[1] == "GOODSIG"]
+    rejected = {"BADSIG", "ERRSIG", "NO_PUBKEY", "REVKEYSIG", "KEYREVOKED",
+                "EXPKEYSIG", "EXPSIG", "KEYEXPIRED", "SIGEXPIRED", "FAILURE", "ERROR"}
+    if (len(signatures) != 1 or len(signatures[0]) != 12 or len(good) != 1
+            or len(good[0]) < 3 or good[0][2] != SIGNING[-16:]
             or signatures[0][2] != SIGNING or signatures[0][-1] != PRIMARY
             or any(len(row) > 1 and row[1] in rejected for row in records)):
         raise SigningError("Signature does not match the repository's release subkey.")

@@ -1,6 +1,6 @@
 """Exercise credential-safe output and failure paths with real subprocesses."""
 
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 import base64
 import os
@@ -165,18 +165,19 @@ class CaptureTests(unittest.TestCase):
 
 
 class PolicyTests(unittest.TestCase):
-    def test_direct_guard_enforces_actions_triggering_user_before_any_work(self):
+    def test_direct_guard_enforces_local_operator_policy_before_any_work(self):
         for command in (["check-user"], ["check-environment"], ["checkout-target"],
-                        ["check-target"], ["run", "unused"], ["publish"]):
+                        ["check-target"], ["record-source"], ["check-source"],
+                        ["run", "unused"], ["publish"]):
             for actor, triggering in (("other", ""), ("scylladb-publisher", "other"), ("", "")):
                 with self.subTest(command=command, actor=actor, triggering=triggering), \
-                        patch.dict(os.environ, {"GITHUB_ACTIONS": "true", "GITHUB_ACTOR": actor,
+                        patch.dict(os.environ, {"GITHUB_ACTIONS": "false", "GITHUB_ACTOR": actor,
                                                "GITHUB_TRIGGERING_ACTOR": triggering}, clear=True), \
                         patch.object(sys, "argv", ["guard.py", *command]), \
-                        patch.object(signing, "run") as run, \
+                        patch.object(signing, "run", return_value="other-local-user") as run, \
                         patch.object(guard, "capture") as capture, redirect_stderr(StringIO()):
                     self.assertEqual(guard.main(), 2)
-                    run.assert_not_called()
+                    run.assert_called_once_with(["gh", "api", "user", "--jq", ".login"])
                     capture.assert_not_called()
 
     def test_publication_requires_workflow_token_without_legacy_fallback(self):
@@ -222,17 +223,35 @@ class PolicyTests(unittest.TestCase):
         preflight = "run: python3 scripts/release/guard.py check-environment"
         self.assertIn(preflight, validation)
         self.assertLess(validation.index(preflight), validation.index("Checkout selected release target"))
+        helpers = validation.split("      - name: Test trusted release helpers\n")[1].split("      - name:")[0]
+        self.assertIn("run: make test-release-signing", helpers)
+        self.assertNotIn("if:", helpers)
+        self.assertLess(validation.index("Test trusted release helpers"),
+                        validation.index("Checkout selected release target"))
         self.assertIn(preflight, release)
         self.assertLess(release.index(preflight), release.index("Sign and verify NuGet packages and checksums"))
         self.assertIn("          ref: ${{ github.sha }}\n", release)
         self.assertNotIn("inputs.target-tag", release)
         for executable in ("release-build", "release-prepare", "dotnet restore", "dotnet test",
-                           "try-get", "release-policy", "checkout-one-commit-before"):
+                           "try-get", "checkout-one-commit-before"):
             self.assertNotIn(executable, release)
         upload = validation.split("      - name: Upload validated packages\n")[1].split("      - name:")[0]
         self.assertIn("          path: nupkgs/*.nupkg\n", upload)
         self.assertIn("          if-no-files-found: error\n", upload)
         self.assertIn("      package-artifact-id: ${{ steps.packages.outputs.artifact-id }}", validation)
+        for output in ("source-sha", "source-ref", "source-ref-sha"):
+            self.assertIn(output + ": ${{ steps.source.outputs." + output + " }}", validation)
+            self.assertIn("${{ needs.validate.outputs." + output + " }}", release)
+        self.assertLess(validation.index("Record selected release source"),
+                        validation.index("Build and check release artifacts"))
+        self.assertEqual(release.count('run: python3 "$RUNNER_TEMP/release-policy/scripts/release/guard.py" check-source'), 2)
+        self.assertLess(release.index("Check validated source before signing"),
+                        release.index("Sign and verify NuGet packages and checksums"))
+        self.assertLess(release.index("Check validated source before publication"),
+                        release.index("Authenticate NuGet trusted publisher"))
+        signing_check = release.split("      - name: Check validated source before signing\n")[1].split("      - name:")[0]
+        self.assertNotIn("if:", signing_check)
+        self.assertNotIn("secrets.", signing_check)
         self.assertIn("artifact-ids: ${{ needs.validate.outputs.package-artifact-id }}", release)
         self.assertIn("          merge-multiple: true\n", release)
         download = release.split("      - name: Download validated packages as data\n")[1].split("      - name:")[0]
@@ -241,15 +260,25 @@ class PolicyTests(unittest.TestCase):
         self.assertNotIn("run-id:", download)
         self.assertNotIn("github-token:", download)
         signing_step = release.split("      - name: Sign and verify NuGet packages and checksums\n")[1].split("      - name:")[0]
-        self.assertIn("run: make release-sign", signing_step)
+        self.assertIn('run: make -f "$RUNNER_TEMP/release-policy/Makefile" release-sign', signing_step)
         self.assertNotIn("if:", signing_step)
         dry_run = release.split("      - name: Perform release dry-run\n")[1].split("      - name:")[0]
         self.assertIn("if: inputs.dry-run == true", dry_run)
-        self.assertIn("run: make release-dry-run-summary", dry_run)
+        self.assertIn('run: make -f "$RUNNER_TEMP/release-policy/Makefile" release-dry-run-summary', dry_run)
         self.assertIn("name: validated-packages-${{ github.run_attempt }}", upload)
         self.assertIn("name: nuget-package-${{ github.run_attempt }}", release)
         self.assertLess(validation.index("Preserve repository signing policy"),
                         validation.index("Checkout selected release target"))
+        self.assertIn("      contents: write\n", release)
+        self.assertIn('git -c core.hooksPath=/dev/null checkout --detach "$RELEASE_SOURCE_SHA"', release)
+        self.assertLess(release.index("Preserve trusted release tools"),
+                        release.index("Fetch validated source without executing project code"))
+        self.assertLess(release.index("Verify prepared history with public key only"),
+                        release.index("Authenticate NuGet trusted publisher"))
+        push = release.split("      - name: Publish verified release history\n")[1].split("      - name:")[0]
+        self.assertIn("if: inputs.dry-run == false", push)
+        self.assertLess(release.index("      - name: Perform release\n"),
+                        release.index("Publish verified release history"))
 
     def test_unsafe_inputs_are_rejected_without_echoing_values(self):
         for name, value in [("RELEASE_VERSION", '1.0.0$(touch unsafe)'),
@@ -270,12 +299,37 @@ class PolicyTests(unittest.TestCase):
                      ["-v:d"], ["-v", "d"], ["--verbosity=d"], ["-verbosity:d"], ["/v:D"],
                      ["-flp:logfile=raw.log"], ["-fileLoggerParameters:LogFile=raw.log"],
                      ["/distributedFileLogger"], ["/flp1:LogFile=raw.log"],
+                     ["-dfl"], ["/dfl"],
                      ["/bl:build.binlog"],
                      ["/fl"], ["/p:Password=private"], ["--api-key", "private"]):
             with self.subTest(args=args), self.assertRaises(guard.Unsafe):
                 guard.check_command(["dotnet", "build", *args])
         guard.check_command(["dotnet", "restore", "--verbosity", "minimal"])
         guard.check_command(["dotnet", "build", "-v:normal"])
+
+    def test_grouped_properties_reject_credential_keys_without_rejecting_nonsecret_values(self):
+        for argument in ("-p:Configuration=Release;Password=private",
+                         "/property:Configuration=Release,ApiKey=private",
+                         "-rp:Configuration=Release;RestoreToken=private",
+                         "/restoreProperty:Configuration=Release,Password=private",
+                         '-p:Configuration=Release;"Password"=private',
+                         '-p:Configuration=Release;Pass"word"=private',
+                         '-p:Pass""word=private',
+                         '-p:Configuration=Release;"ApiKey=private"',
+                         '-p:Description="Public;Password=label";ApiKey=private',
+                         r'-p:Description="Public\\";Password=private',
+                         r'-p:Description="Public\"";Password=private',
+                         '-p:Description=Pub""lic;Password=private'):
+            with self.subTest(argument=argument), self.assertRaises(guard.Unsafe):
+                guard.check_command(["dotnet", "build", argument])
+        guard.check_command(["dotnet", "build", "-p:Configuration=Release;Version=1.2.3",
+                             "/property:Description=password token secret,PackageVersion=1.2.3",
+                             "-rp:Configuration=Release;RestoreSources=https://example.invalid",
+                             '-p:Description="Public;Password=label"',
+                             '-p:Description="Public,ApiKey=label"',
+                             '-p:Description=Pub""lic;Version=1.2.3',
+                             '-p:Description="Pub""lic"',
+                             r'-p:Description="Public\";Password=label"'])
 
     def test_protected_environment_fails_closed_on_weaker_settings(self):
         environment = {"can_admins_bypass": False,
@@ -332,6 +386,120 @@ class PolicyTests(unittest.TestCase):
             self.assertEqual(signing.run(["git", "rev-parse", "HEAD"]), "expected\n")
             self.assertEqual(signing.run(["git", "verify-tag", "--raw", "tag"]),
                              "expected\nunexpected warning\n")
+
+
+class SourceTests(unittest.TestCase):
+    def setUp(self):
+        fixture = tempfile.TemporaryDirectory(prefix="release-source-test-")
+        self.addCleanup(fixture.cleanup)
+        original = Path.cwd()
+        self.addCleanup(os.chdir, original)
+        self.directory = Path(fixture.name)
+        env = {key: value for key, value in os.environ.items()
+               if not key.startswith(("GIT_", "GITHUB_", "RELEASE_", "MAKE"))}
+        env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
+                   GITHUB_REPOSITORY="owner/repo", RELEASE_TARGET_TAG="main")
+        self.enterContext(patch.dict(os.environ, env, clear=True))
+        os.chdir(self.directory)
+        self.remote = self.directory / "remote.git"
+        signing.run(["git", "init", "--bare", "--quiet", str(self.remote)])
+        signing.run(["git", "init", "--quiet", "--initial-branch=main", "source"])
+        os.chdir(self.directory / "source")
+        signing.run(["git", "remote", "add", "origin", str(self.remote)])
+        self.commit()
+        signing.run(["git", "push", "--quiet", "origin", "main"])
+        os.environ["GITHUB_SHA"] = signing.run(["git", "rev-parse", "HEAD"]).strip()
+
+    def commit(self):
+        signing.run(["git", "-c", "user.name=Release Test", "-c", "user.email=release@example.invalid",
+                     "-c", "commit.gpgsign=false", "commit", "--quiet", "--allow-empty", "-m", "Source"])
+
+    def record(self):
+        output = StringIO()
+        with redirect_stdout(output):
+            guard.record_source()
+        values = dict(line.split("=", 1) for line in output.getvalue().splitlines())
+        os.environ.update({"RELEASE_" + key.upper().replace("-", "_"): value
+                           for key, value in values.items()})
+        return values
+
+    def check(self):
+        # Substitute only GitHub's ref API; read its response from a real bare remote.
+        run = signing.run
+        def remote_ref(command, **kwargs):
+            if command[0] != "gh":
+                return run(command, **kwargs)
+            prefix = "repos/owner/repo/git/ref/"
+            self.assertEqual(command[:2], ["gh", "api"])
+            self.assertTrue(command[2].startswith(prefix))
+            ref = "refs/" + urllib.parse.unquote(command[2][len(prefix):])
+            sha = run(["git", "--git-dir", str(self.remote), "rev-parse", "--verify", ref]).strip()
+            return json.dumps({"ref": ref, "object": {"sha": sha}})
+        with patch.object(signing, "run", side_effect=remote_ref):
+            guard.check_source()
+
+    def test_branch_advance_after_validation_is_rejected(self):
+        values = self.record()
+        self.assertEqual(values["source-sha"], os.environ["GITHUB_SHA"])
+        self.assertEqual(values["source-ref"], "heads/main")
+        self.check()
+        self.commit()
+        signing.run(["git", "push", "--quiet", "origin", "main"])
+        with self.assertRaises(guard.Unsafe):
+            self.check()
+
+    def test_main_advance_since_dispatch_is_rejected_before_build(self):
+        self.commit()
+        signing.run(["git", "push", "--quiet", "origin", "main"])
+        with redirect_stdout(StringIO()), self.assertRaises(guard.Unsafe):
+            guard.record_source()
+
+    def test_main_tag_cannot_replace_the_main_branch(self):
+        signing.run(["git", "-c", "tag.gpgSign=false", "tag", "main"])
+        self.assertEqual(self.record()["source-ref"], "heads/main")
+        self.check()
+
+    def test_deleted_source_ref_is_rejected(self):
+        self.record()
+        signing.run(["git", "--git-dir", str(self.remote), "update-ref", "-d", "refs/heads/main"])
+        with self.assertRaises(signing.SigningError):
+            self.check()
+
+    def test_historical_tag_records_parent_and_rejects_moved_tag(self):
+        parent = os.environ["GITHUB_SHA"]
+        self.commit()
+        signing.run(["git", "-c", "user.name=Release Test", "-c", "user.email=release@example.invalid",
+                     "-c", "tag.gpgSign=false", "tag", "-a", "-m", "Release", "v1.0.0"])
+        signing.run(["git", "push", "--quiet", "origin", "refs/tags/v1.0.0"])
+        signing.run(["git", "checkout", "--quiet", "--detach", "v1.0.0~1"])
+        os.environ["RELEASE_TARGET_TAG"] = "v1.0.0"
+        values = self.record()
+        self.assertEqual(values["source-sha"], parent)
+        self.assertEqual(values["source-ref"], "tags/v1.0.0")
+        self.assertNotEqual(values["source-ref-sha"], parent)
+        self.check()
+        signing.run(["git", "-c", "tag.gpgSign=false", "tag", "-f", "v1.0.0", parent])
+        signing.run(["git", "push", "--quiet", "--force", "origin", "refs/tags/v1.0.0"])
+        with self.assertRaises(guard.Unsafe):
+            self.check()
+        self.assertEqual(signing.run(["git", "rev-parse", "HEAD"]).strip(), parent)
+
+    def test_branch_with_slash_is_supported(self):
+        signing.run(["git", "checkout", "--quiet", "-b", "release/1.0"])
+        signing.run(["git", "push", "--quiet", "origin", "release/1.0"])
+        os.environ["RELEASE_TARGET_TAG"] = "release/1.0"
+        self.assertEqual(self.record()["source-ref"], "heads/release/1.0")
+        self.check()
+
+    def test_missing_or_inconsistent_source_metadata_fails_closed(self):
+        self.record()
+        for name, value in (("RELEASE_SOURCE_SHA", ""), ("RELEASE_SOURCE_SHA", "invalid"),
+                            ("RELEASE_SOURCE_SHA", "0" * 40), ("RELEASE_SOURCE_REF_SHA", ""),
+                            ("RELEASE_SOURCE_REF", "heads/main\n"),
+                            ("RELEASE_SOURCE_REF", "pull/86/head"), ("GITHUB_REPOSITORY", "")):
+            with self.subTest(name=name, value=value), patch.dict(os.environ, {name: value}), \
+                    self.assertRaises((guard.Unsafe, signing.SigningError)):
+                self.check()
 
 
 if __name__ == "__main__":

@@ -15,6 +15,7 @@ import unittest
 from unittest.mock import patch
 
 import guard
+import history
 import signing
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -22,14 +23,46 @@ REPOSITORY_PRIMARY = signing.PRIMARY
 REPOSITORY_SIGNING = signing.SIGNING
 
 
+def cancellation_pid(path):
+    try:
+        return int(path.read_text())
+    except (FileNotFoundError, ValueError):
+        return None
+
+
+def stop_cancellation_processes(process, *pid_files):
+    """Bound failure cleanup even when detached descendants retain the pipes."""
+    if process.poll() is None:
+        process.kill()
+    for path in pid_files:
+        pid = cancellation_pid(path)
+        if pid is None:
+            continue
+        for stop in (os.killpg, os.kill):
+            try:
+                stop(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    try:
+        process.communicate(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.stdout.close()
+        process.stderr.close()
+        process.wait(timeout=5)
+
+
 @unittest.skipUnless(shutil.which("gpg") and shutil.which("git"), "GnuPG and Git required")
 class SigningTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.fixture = tempfile.TemporaryDirectory(prefix="repo-signing-fixture-")
+        cls.addClassCleanup(cls.fixture.cleanup)
         cls.directory = Path(cls.fixture.name)
         cls.keyring = cls.directory / "gnupg"
         cls.keyring.mkdir(mode=0o700)
+        cls.addClassCleanup(subprocess.run,
+                            ["gpgconf", "--homedir", str(cls.keyring), "--kill", "gpg-agent"],
+                            capture_output=True, check=True, timeout=60)
         cls.password = "test-only-release-passphrase"
         def gpg(*args):
             result = subprocess.run(
@@ -50,12 +83,6 @@ class SigningTests(unittest.TestCase):
         cls.private.write_text(gpg("--armor", "--export-secret-subkeys", cls.primary))
         cls.full = cls.directory / "full.asc"
         cls.full.write_text(gpg("--armor", "--export-secret-keys", cls.primary))
-
-    @classmethod
-    def tearDownClass(cls):
-        subprocess.run(["gpgconf", "--homedir", str(cls.keyring), "--kill", "gpg-agent"],
-                       capture_output=True, check=True, timeout=60)
-        cls.fixture.cleanup()
 
     @contextmanager
     def repository(self, full=False, password=None):
@@ -290,28 +317,34 @@ class SigningTests(unittest.TestCase):
     def test_cancellation_stops_signing_children_and_removes_keyring(self):
         with self.make_repository() as directory:
             marker = directory / "child-pid"
+            group = directory / "child-group"
             code = ("import os, subprocess, sys, time; "
+                    "open(sys.argv[2], 'w').write(str(os.getpid())); "
                     "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
                     "open(sys.argv[1], 'w').write(str(child.pid)); time.sleep(60)")
             helper = Path("scripts/release/signing.py").resolve()
             process = subprocess.Popen([sys.executable, str(helper), "exec", sys.executable,
-                                        "-c", code, str(marker)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                                        "-c", code, str(marker), str(group)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             try:
                 deadline = time.monotonic() + 15
-                while not marker.exists() and process.poll() is None and time.monotonic() < deadline:
+                while cancellation_pid(marker) is None and process.poll() is None and time.monotonic() < deadline:
                     time.sleep(.05)
                 self.assertTrue(marker.exists())
                 process.send_signal(signal.SIGTERM)
                 process.communicate(timeout=15)
                 self.assertEqual(process.returncode, 128 + signal.SIGTERM)
-                pid = int(marker.read_text())
+                pid = cancellation_pid(marker)
+                self.assertIsNotNone(pid)
                 stat = Path('/proc') / str(pid) / 'stat'
                 self.assertTrue(not stat.exists() or stat.read_text().split()[2] == 'Z')
                 self.assertFalse(list(directory.glob("release-signing-*")))
             finally:
-                if process.poll() is None:
-                    process.kill()
-                    process.communicate()
+                try:
+                    stop_cancellation_processes(process, group, marker)
+                finally:
+                    for keyring in directory.glob("release-signing-*"):
+                        subprocess.run(["gpgconf", "--homedir", str(keyring), "--kill", "gpg-agent"],
+                                       capture_output=True, timeout=5)
 
     def test_direct_publication_rejects_unsigned_tampered_and_unlisted_packages(self):
         for corruption in ("unsigned", "tampered", "unlisted"):
@@ -347,6 +380,14 @@ class SigningTests(unittest.TestCase):
                               .replace(REPOSITORY_SIGNING, self.subkey))
             shutil.copyfile(self.public, helper.with_name("publisher.asc"))
             shutil.copyfile(ROOT / "scripts/release/guard.py", helper.with_name("guard.py"))
+            shutil.copyfile(ROOT / "scripts/release/history.py", helper.with_name("history.py"))
+            Path("ScyllaDB.Alternator.csproj").write_text(
+                '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup>'
+                '<TargetFramework>net8.0</TargetFramework><PackageId>ScyllaDB.Alternator</PackageId>'
+                '<VersionPrefix>2.0.5</VersionPrefix></PropertyGroup></Project>\n')
+            signing.run(["git", "add", "ScyllaDB.Alternator.csproj"])
+            signing.run(["git", "-c", "user.name=Initial", "-c", "user.email=initial@example.invalid",
+                         "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "Package project"])
             if preserved:
                 # Historical targets may contain neither release policy nor helpers.
                 Path("Makefile").write_text("release-build release-sign:\n\t@exit 99\n")
@@ -384,13 +425,14 @@ class SigningTests(unittest.TestCase):
                               RELEASE_GPG_PASSPHRASE_FILE=str(password))
             yield directory
 
-    def test_make_release_prepares_signed_packages_without_changing_git(self):
+    def test_make_release_prepares_signed_packages_and_history_without_changing_checkout(self):
         with self.make_repository() as directory:
             before = signing.run(["git", "rev-parse", "HEAD"])
             config = Path(".git/config").read_bytes()
             signing.run(["make", "-n", "release-build"])
             observations = Path(os.environ["BUILD_OBSERVATIONS"])
             self.assertFalse(observations.exists())
+            os.environ.update(GITHUB_ACTOR="approved-maintainer", GITHUB_TRIGGERING_ACTOR="another-maintainer")
             signing.run(["make", "-j2", "release-dry-run", "RELEASE_VERSION=1.0.0",
                          "PACKAGE_OUTPUT_DIR=nupkgs",
                          "RELEASE_GPG_PASSPHRASE=" + self.password])
@@ -400,7 +442,7 @@ class SigningTests(unittest.TestCase):
             self.assertIn("/p:Version=1.0.0", commands)
             self.assertIn("/p:PackageVersion=1.0.0", commands)
             self.assertNotIn('"push"', commands)
-            self.assertEqual(len(list(Path("nupkgs").glob("*.asc"))), 2)
+            self.assertEqual(len(list(Path("nupkgs").glob("*.asc"))), 3)
             subprocess.run(["sha256sum", "--check", "SHA256SUMS"], cwd="nupkgs", check=True,
                            capture_output=True, timeout=60)
             with signing.public_environment() as env:
@@ -409,7 +451,13 @@ class SigningTests(unittest.TestCase):
                                                      str(artifact) + ".asc", artifact, env=env))
             self.assertEqual(signing.run(["git", "rev-parse", "HEAD"]), before)
             self.assertEqual(Path(".git/config").read_bytes(), config)
-            self.assertEqual(signing.run(["git", "tag", "--list"]), "")
+            self.assertEqual(signing.run(["git", "tag", "--list"]).strip(), "1.0.0")
+            prepared = history.verify()
+            self.assertEqual(prepared["baseline"], before.strip())
+            self.assertIn("<VersionPrefix>1.0.0</VersionPrefix>",
+                          signing.run(["git", "show", "1.0.0:ScyllaDB.Alternator.csproj"]))
+            self.assertIn("<VersionSuffix>dev</VersionSuffix>", signing.run([
+                "git", "show", prepared["development-commit"] + ":ScyllaDB.Alternator.csproj"]))
             self.assertFalse(list(directory.glob("release-signing-*")))
             self.assertFalse(Path(os.environ["GITHUB_ENV"]).exists())
 
@@ -418,14 +466,90 @@ class SigningTests(unittest.TestCase):
             signing.run(["make", "-f", str(directory / "release-policy/Makefile"), "release-prepare",
                          "RELEASE_SKIP_TESTS=true", "RELEASE_VERSION=1.0.0"])
             commands = Path(os.environ["BUILD_OBSERVATIONS"]).read_text()
-            self.assertNotIn('"build"', commands)
-            self.assertNotIn('"format"', commands)
             self.assertNotIn('"test"', commands)
-            for command in ['"pack"', '"add"', '"run"']:
+            for command in ['"build"', '"format"', '"pack"', '"add"', '"run"']:
                 self.assertIn(command, commands)
             self.assertTrue(Path("nupkgs/ScyllaDB.Alternator.1.0.0.nupkg.asc").is_file())
             self.assertFalse((directory / "release-policy/nupkgs").exists())
             self.assertFalse(list(directory.glob("release-signing-*")))
+
+    def prepare_remote_history(self, directory):
+        remote = directory / "remote.git"
+        signing.run(["git", "init", "--bare", "--quiet", str(remote)])
+        signing.run(["git", "remote", "add", "origin", str(remote)])
+        signing.run(["git", "push", "--quiet", "origin", "HEAD:refs/heads/main"])
+        signing.run(["git", "checkout", "--quiet", "--detach", "HEAD"])
+        signing.run(["make", "release-prepare", "RELEASE_VERSION=1.0.0"])
+        return remote, history.verify()
+
+    def test_history_push_from_detached_checkout_publishes_both_refs_without_hooks(self):
+        with self.make_repository() as directory:
+            remote, prepared = self.prepare_remote_history(directory)
+            marker = directory / "hook-ran"
+            hook = Path(".git/hooks/pre-push")
+            hook.write_text("#!/bin/sh\ntouch '" + str(marker) + "'\nexit 99\n")
+            hook.chmod(0o700)
+            signing.run(["make", "release-push-history"])
+            self.assertEqual(signing.run(["git", "--git-dir", str(remote), "rev-parse", "refs/heads/main"]).strip(),
+                             prepared["development-commit"])
+            self.assertEqual(signing.run(["git", "--git-dir", str(remote), "rev-parse", "refs/tags/1.0.0^{commit}"]).strip(),
+                             prepared["release-commit"])
+            self.assertFalse(marker.exists())
+            self.assertEqual(signing.run(["git", "rev-parse", "HEAD"]).strip(), prepared["baseline"])
+
+    def test_history_push_rejects_advanced_main_without_publishing_tag(self):
+        with self.make_repository() as directory:
+            remote, prepared = self.prepare_remote_history(directory)
+            advanced = signing.run(["git", "-c", "user.name=Other", "-c", "user.email=other@example.invalid",
+                                    "commit-tree", prepared["release-tree"], "-p", prepared["baseline"],
+                                    "-m", "Concurrent change"]).strip()
+            signing.run(["git", "--git-dir", str(remote), "fetch", "--quiet", str(Path.cwd()), advanced])
+            signing.run(["git", "--git-dir", str(remote), "update-ref", "refs/heads/main", advanced])
+            with self.assertRaises(signing.SigningError):
+                history.push()
+            self.assertEqual(signing.run(["git", "--git-dir", str(remote), "rev-parse", "refs/heads/main"]).strip(), advanced)
+            self.assertEqual(signing.invoke(["git", "--git-dir", str(remote), "show-ref", "--verify", "--quiet",
+                                             "refs/tags/1.0.0"]).returncode, 1)
+
+    def test_history_push_rejects_remote_tag_collision_without_advancing_main(self):
+        with self.make_repository() as directory:
+            remote, prepared = self.prepare_remote_history(directory)
+            signing.run(["git", "--git-dir", str(remote), "update-ref", "refs/tags/1.0.0", prepared["baseline"]])
+            with self.assertRaises(signing.SigningError):
+                history.push()
+            for ref in ("refs/heads/main", "refs/tags/1.0.0"):
+                self.assertEqual(signing.run(["git", "--git-dir", str(remote), "rev-parse", ref]).strip(), prepared["baseline"])
+
+    def test_history_verification_rejects_unsigned_commit_and_lightweight_tag(self):
+        with self.make_repository():
+            signing.run(["make", "release-prepare", "RELEASE_VERSION=1.0.0"])
+            prepared = history.verify()
+            branch = "refs/heads/release-prepared/1.0.0"
+            unsigned = signing.run(["git", "-c", "user.name=Other", "-c", "user.email=other@example.invalid",
+                                    "commit-tree", prepared["development-tree"], "-p", prepared["release-commit"],
+                                    "-m", "Unsigned development"]).strip()
+            changed = {**prepared, "development-commit": unsigned}
+            history.write_manifest(changed)
+            signing.run(["git", "update-ref", branch, unsigned])
+            with self.assertRaises(signing.SigningError):
+                history.verify()
+            history.write_manifest(prepared)
+            signing.run(["git", "update-ref", branch, prepared["development-commit"]])
+            tag_object = signing.run(["git", "rev-parse", "refs/tags/1.0.0"]).strip()
+            signing.run(["git", "update-ref", "refs/tags/1.0.0", prepared["release-commit"]])
+            with self.assertRaises(signing.SigningError):
+                history.verify()
+            signing.run(["git", "update-ref", "refs/tags/1.0.0", tag_object])
+            history.verify()
+
+    def test_repeated_preparation_never_replaces_an_existing_tag(self):
+        with self.make_repository():
+            signing.run(["make", "release-prepare", "RELEASE_VERSION=1.0.0"])
+            tag = signing.run(["git", "rev-parse", "refs/tags/1.0.0"])
+            result = subprocess.run(["make", "release-prepare", "RELEASE_VERSION=1.0.0"],
+                                    capture_output=True, text=True, timeout=60)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(signing.run(["git", "rev-parse", "refs/tags/1.0.0"]), tag)
 
     def test_checksum_order_matches_verification_in_non_c_locale(self):
         locales = signing.run(["locale", "-a"]).splitlines()
@@ -433,14 +557,16 @@ class SigningTests(unittest.TestCase):
         if selected is None:
             self.skipTest("an en_US locale is needed to exercise non-C filename collation")
         with self.make_repository(), patch.dict(os.environ, {"LC_ALL": selected, "PACKAGE_OUTPUT_DIR": "nupkgs"}):
-            Path("nupkgs").mkdir()
+            signing.run(["make", "release-build"])
+            signing.run(["make", "release-history"])
+            for package in Path("nupkgs").glob("*.nupkg"):
+                package.unlink()
             names = ["a.nupkg", "Z.nupkg", "_.nupkg", "+.nupkg", "-.nupkg", "A.nupkg"]
             for name in names:
                 Path("nupkgs", name).write_bytes(name.encode())
             signing.run(["make", "release-sign"])
             entries = [line.split("  ", 1)[1] for line in Path("nupkgs/SHA256SUMS").read_text().splitlines()]
-            self.assertEqual(entries, sorted(names))
-            self.assertEqual([package.name for package in guard.verify_outputs()], sorted(names))
+            self.assertEqual(entries, sorted([*names, "release-history.bundle", "release-history.json"]))
 
     def test_separate_release_workspace_signs_validated_bytes_with_trusted_tools(self):
         with self.make_repository(preserved=True) as validation:
@@ -456,17 +582,21 @@ class SigningTests(unittest.TestCase):
                 release = Path(temp)
                 # Only package data crosses from the selected target. Tools come
                 # from the retained trusted policy, as with the pinned checkout.
+                signing.run(["git", "clone", "--quiet", "--no-local", str(source), str(release / "source")])
+                release = release / "source"
                 shutil.copyfile(policy / "Makefile", release / "Makefile")
                 shutil.copytree(policy / "scripts", release / "scripts")
                 (release / "nupkgs").mkdir()
                 transferred = release / "nupkgs" / package.name
                 shutil.copyfile(package, transferred)
-                self.assertFalse((release / "ScyllaDB.Alternator.csproj").exists())
+                self.assertTrue((release / "ScyllaDB.Alternator.csproj").exists())
                 try:
                     os.chdir(release)
                     with patch.dict(os.environ, {"MAKEFILE_PATH": str(release),
                                                  "PACKAGE_OUTPUT_DIR": str(release / "nupkgs"),
-                                                 "RUNNER_TEMP": str(release)}):
+                                                 "RUNNER_TEMP": str(release), "RELEASE_VERSION": "1.0.0"}):
+                        signing.run(["python3", "scripts/release/history.py", "plan"])
+                        signing.run(["make", "release-history"])
                         signing.run(["make", "release-sign"])
                         signing.run(["make", "release-dry-run-summary"])
                         with signing.public_environment() as env:
@@ -489,7 +619,7 @@ class SigningTests(unittest.TestCase):
                          "NUGET_PUBLISH_TOKEN=test-only-publishing-key"])
             packages = list(Path("nupkgs").glob("*.nupkg"))
             self.assertEqual([path.name for path in packages], ["ScyllaDB.Alternator.2.0.0.nupkg"])
-            self.assertEqual(len(list(Path("nupkgs").glob("*.asc"))), 2)
+            self.assertEqual(len(list(Path("nupkgs").glob("*.asc"))), 3)
             self.assertEqual(Path("nupkgs/notes.txt").read_text(), "unrelated retained file")
             signing.sign_files([*packages, Path("nupkgs/SHA256SUMS")])
             subprocess.run(["sha256sum", "--check", "SHA256SUMS"], cwd="nupkgs", check=True,
@@ -587,9 +717,104 @@ class SigningTests(unittest.TestCase):
                     self.assertFalse(Path("nupkgs/SHA256SUMS").exists())
                 else:
                     self.assertIn("GPG signature creation failed", result.stderr)
-                    self.assertTrue(Path("nupkgs/SHA256SUMS").exists())
+                    self.assertFalse(Path("nupkgs/SHA256SUMS").exists())
                 self.assertFalse(list(Path("nupkgs").glob("*.asc")))
                 self.assertFalse(list(directory.glob("release-signing-*")))
+
+
+class FixtureCleanupTests(unittest.TestCase):
+    def assert_stopped(self, pid):
+        status = Path("/proc") / str(pid) / "stat"
+        deadline = time.monotonic() + 2
+        while True:
+            try:
+                stopped = status.read_text().split()[2] == "Z"
+            except FileNotFoundError:
+                stopped = True
+            if stopped or time.monotonic() >= deadline:
+                break
+            time.sleep(.01)
+        self.assertTrue(stopped)
+
+    @unittest.skipUnless(shutil.which("gpgconf") and shutil.which("gpg-connect-agent"), "GnuPG tools required")
+    def test_partial_class_setup_cleans_agent_and_files_even_when_agent_cleanup_raises(self):
+        original_run = subprocess.run
+        for kill_failure in (False, True):
+            with self.subTest(kill_failure=kill_failure):
+                class Probe(SigningTests):
+                    def runTest(self):
+                        self.fail("partial setup should skip the test")
+                agents, kills = [], []
+                def fail_setup(command, **kwargs):
+                    if "--quick-generate-key" in command:
+                        original_run(["gpgconf", "--homedir", str(Probe.keyring), "--launch", "gpg-agent"],
+                                     capture_output=True, check=True, timeout=5)
+                        response = original_run(["gpg-connect-agent", "--homedir", str(Probe.keyring),
+                                                 "--no-autostart", "GETINFO pid", "/bye"],
+                                                capture_output=True, text=True, check=True, timeout=5)
+                        agents.append(int(next(line.split()[1] for line in response.stdout.splitlines()
+                                               if line.startswith("D "))))
+                        raise RuntimeError("injected partial fixture setup")
+                    result = original_run(command, **kwargs)
+                    if command[0] == "gpgconf" and "--kill" in command:
+                        kills.append(True)
+                        if kill_failure:
+                            raise subprocess.CalledProcessError(1, ["gpgconf"])
+                    return result
+                try:
+                    result = unittest.TestResult()
+                    with patch.object(subprocess, "run", side_effect=fail_setup):
+                        unittest.TestSuite([Probe("runTest")]).run(result)
+                    self.assertEqual(len(result.errors), 2 if kill_failure else 1)
+                    self.assertIn("injected partial fixture setup", result.errors[0][1])
+                    self.assertEqual(kills, [True])
+                    self.assertFalse(Probe.directory.exists())
+                    for pid in agents:
+                        self.assert_stopped(pid)
+                finally:
+                    if hasattr(Probe, "keyring") and Probe.keyring.exists():
+                        original_run(["gpgconf", "--homedir", str(Probe.keyring), "--kill", "gpg-agent"],
+                                     capture_output=True, timeout=5)
+                    Probe.fixture.cleanup()
+
+    def test_failure_cleanup_stops_detached_descendant_after_helper_exits(self):
+        with tempfile.TemporaryDirectory() as temp:
+            marker = Path(temp) / "pid"
+            child_code = "import os,sys,time; open(sys.argv[1], 'w').write(str(os.getpid())); time.sleep(60)"
+            helper_code = ("import subprocess,sys; subprocess.Popen([sys.executable, '-c', "
+                           + repr(child_code) + ", sys.argv[1]], start_new_session=True)")
+            process = subprocess.Popen([sys.executable, "-c", helper_code, str(marker)],
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try:
+                process.wait(timeout=5)
+                deadline = time.monotonic() + 5
+                while cancellation_pid(marker) is None and time.monotonic() < deadline:
+                    time.sleep(.01)
+                self.assertTrue(marker.exists())
+                pid = cancellation_pid(marker)
+                self.assertIsNotNone(pid)
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    process.communicate(timeout=.05)
+                start = time.monotonic()
+                stop_cancellation_processes(process, marker)
+                self.assertLess(time.monotonic() - start, 3)
+                self.assert_stopped(pid)
+            finally:
+                # Independent backstop keeps a failed regression test bounded.
+                pid = cancellation_pid(marker)
+                if pid is not None:
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                if process.poll() is None:
+                    process.kill()
+                try:
+                    process.communicate(timeout=2)
+                except subprocess.TimeoutExpired:
+                    process.stdout.close()
+                    process.stderr.close()
+                    process.wait(timeout=2)
 
 
 class SignatureStatusTests(unittest.TestCase):
@@ -599,12 +824,23 @@ class SignatureStatusTests(unittest.TestCase):
         with patch.object(subprocess, "run", return_value=result), self.assertRaises(signing.SigningError):
             signing.verify_status(signing.gpg("--status-fd", "1", "--verify", "test.asc", "test"))
 
-    def test_expected_signer_preserves_gnupg_expiry_and_goodsig_behavior(self):
+    def test_expected_signer_requires_matching_goodsig_and_validsig(self):
         valid = "[GNUPG:] VALIDSIG " + signing.SIGNING + " 2026-10-20 1 0 4 0 1 10 00 " + signing.PRIMARY
-        signing.verify_status(valid)
-        for code in ("GOODSIG", "EXPKEYSIG", "EXPSIG", "KEYEXPIRED", "SIGEXPIRED"):
-            with self.subTest(code=code):
-                signing.verify_status("[GNUPG:] " + code + "\n" + valid)
+        good = "[GNUPG:] GOODSIG " + signing.SIGNING[-16:] + " Release signer\n"
+        signing.verify_status(good + valid)
+        for status in (valid, good, "[GNUPG:] GOODSIG\n" + valid,
+                       good.replace(signing.SIGNING[-16:], "0" * 16) + valid,
+                       good + good + valid):
+            with self.subTest(status=status), self.assertRaises(signing.SigningError):
+                signing.verify_status(status)
+
+    def test_expired_or_failed_signatures_rejected_even_alongside_validsig(self):
+        valid = "[GNUPG:] GOODSIG " + signing.SIGNING[-16:] + " Release signer\n"
+        valid += "[GNUPG:] VALIDSIG " + signing.SIGNING + " 2026-10-20 1 0 4 0 1 10 00 " + signing.PRIMARY
+        for code in ("EXPKEYSIG", "EXPSIG", "KEYEXPIRED", "SIGEXPIRED", "BADSIG",
+                     "ERRSIG", "NO_PUBKEY", "FAILURE", "ERROR"):
+            with self.subTest(code=code), self.assertRaises(signing.SigningError):
+                signing.verify_status(valid + "\n[GNUPG:] " + code)
 
     def test_wrong_ambiguous_and_revoked_signatures_rejected(self):
         valid = "[GNUPG:] VALIDSIG " + signing.SIGNING + " 2026-10-20 1 0 4 0 1 10 00 " + signing.PRIMARY
@@ -677,13 +913,13 @@ class DiagnosticTests(unittest.TestCase):
 
 
 class ReleaseUserTests(unittest.TestCase):
-    def test_actions_release_requires_publisher_triggering_user_including_reruns(self):
+    def test_actions_release_allows_operators_different_from_publisher_including_reruns(self):
         for actor, rerun, allowed in [("scylladb-publisher", "", True),
                                       ("scylladb-publisher", "scylladb-publisher", True),
                                       ("other-maintainer", "scylladb-publisher", True),
-                                      ("other-maintainer", "", False),
-                                      ("scylladb-publisher", "other-maintainer", False),
-                                      ("", "", False)]:
+                                      ("other-maintainer", "", True),
+                                      ("scylladb-publisher", "other-maintainer", True),
+                                      ("", "", True)]:
             with self.subTest(actor=actor, rerun=rerun):
                 result = subprocess.run(["make", "release-check-user"], cwd=ROOT,
                                         capture_output=True, text=True, timeout=60,
@@ -691,18 +927,16 @@ class ReleaseUserTests(unittest.TestCase):
                                              "GITHUB_ACTOR": actor, "GITHUB_TRIGGERING_ACTOR": rerun})
                 self.assertEqual(result.returncode == 0, allowed, result.stderr)
 
-    def test_actions_dry_run_rejects_other_triggering_user_before_preparation(self):
+    def test_actions_operator_authorization_does_not_use_local_gh_account(self):
         with tempfile.TemporaryDirectory() as temp:
             output = Path(temp) / "packages"
-            result = subprocess.run(["make", "release-dry-run"], cwd=ROOT,
+            result = subprocess.run(["make", "release-check-user"], cwd=ROOT,
                                     capture_output=True, text=True, timeout=60,
                                     env={**os.environ, "GITHUB_ACTIONS": "true",
                                          "GITHUB_ACTOR": "scylladb-publisher",
                                          "GITHUB_TRIGGERING_ACTOR": "other-maintainer",
                                          "PACKAGE_OUTPUT_DIR": str(output)})
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("Release safety check failed", result.stderr)
-            self.assertNotIn("release-prepare", result.stdout)
+            self.assertEqual(result.returncode, 0, result.stderr)
             self.assertFalse(output.exists())
 
     def test_publication_job_uses_release_environment(self):

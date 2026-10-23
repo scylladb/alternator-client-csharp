@@ -35,9 +35,8 @@ class Unsafe(ValueError):
 
 def authorize_operator():
     if os.environ.get("GITHUB_ACTIONS") == "true":
-        actor = os.environ.get("GITHUB_TRIGGERING_ACTOR") or os.environ.get("GITHUB_ACTOR", "")
-        if actor != "scylladb-publisher":
-            raise Unsafe("Actions release requires the configured publisher triggering user")
+        # GitHub's protected deployment environment authorizes Actions operators.
+        # Signing identity is established independently by the pinned subkey.
         return
     if signing.run(["gh", "api", "user", "--jq", ".login"]).strip() != "scylladb-publisher":
         raise Unsafe("local publication requires the configured publisher account")
@@ -74,6 +73,9 @@ def check_inputs():
     version = os.environ.get("RELEASE_VERSION", "")
     if version and not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?", version):
         raise Unsafe("invalid release version")
+    next_version = os.environ.get("RELEASE_NEXT_VERSION", "")
+    if next_version and not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", next_version):
+        raise Unsafe("invalid next development version")
     if os.environ.get("RELEASE_SKIP_TESTS", "false") not in ("true", "false", "1", "0", ""):
         raise Unsafe("invalid test control")
     if os.environ.get("DOTNET_VERBOSITY", "normal") not in ("quiet", "minimal", "normal"):
@@ -90,11 +92,38 @@ def check_inputs():
             raise Unsafe("MSBuild debug output is disabled")
 
 
+def property_names(value):
+    """Find grouped MSBuild keys, splitting only outside its double quotes."""
+    parts = []
+    quoted = False
+    backslashes = start = index = 0
+    while index < len(value):
+        character = value[index]
+        if character == '"' and backslashes % 2 == 0:
+            # MSBuild consumes a doubled closing quote as a literal quote,
+            # then leaves quoted mode. Odd backslashes escape a quote.
+            if quoted and index + 1 < len(value) and value[index + 1] == '"':
+                index += 1
+            quoted = not quoted
+        elif character in ";," and not quoted:
+            parts.append(value[start:index])
+            start = index + 1
+        backslashes = backslashes + 1 if character == "\\" else 0
+        index += 1
+    parts.append(value[start:])
+    # Retain key text when removing syntactic quotes, including split quoted
+    # names and a fully quoted assignment; quoted values are never scanned.
+    return [part.split("=", 1)[0].replace('"', '') for part in parts if "=" in part]
+
+
 def check_command(command):
     # Validate before launch; never echo option contents in diagnostics.
     for index, argument in enumerate(command[1:], 1):
+        properties = re.match(r"(?i)^[-/](?:p|property|rp|restoreproperty):(.*)$", argument)
         if (re.search(r"(?i)(?:^[-/](?:p|property):|^--?)(?:[^=]*(?:password|passphrase|token|secret|api[-_]?key|authorization)[^=]*)(?:=|$)", argument)
-                or re.match(r"(?i)^[-/](?:bl|binarylogger|fl|filelogger|flp|fileloggerparameters|distributedfilelogger)(?:[:=0-9]|$)", argument)
+                or (properties and any(re.search(r"(?i)password|passphrase|token|secret|api[-_]?key|authorization", name)
+                                       for name in property_names(properties[1])))
+                or re.match(r"(?i)^[-/](?:bl|binarylogger|fl|filelogger|flp|fileloggerparameters|distributedfilelogger|dfl)(?:[:=0-9]|$)", argument)
                 or re.match(r"(?i)^(?:[-/]v(?:erbosity)?[:=]|--verbosity=)(?:diag(?:nostic)?|d(?:etailed)?)$", argument)
                 or argument.lower() in ("--debug", "-x")):
             raise Unsafe("debug logging or credential-bearing command properties are disabled")
@@ -111,6 +140,56 @@ def check_target():
             or project.findtext(".//TargetFramework") != "net8.0"
             or project.findtext(".//PackageId") != "ScyllaDB.Alternator"):
         raise Unsafe("release target must be the supported .NET 8 Alternator package")
+
+
+def record_source():
+    """Record the selected commit and original ref without executing target code."""
+    target = os.environ.get("RELEASE_TARGET_TAG", "main") or "main"
+    signing.run(["git", "check-ref-format", "refs/heads/" + target])
+    tag = "refs/tags/" + target
+    result = signing.invoke(["git", "show-ref", "--verify", "--quiet", tag])
+    if result.returncode not in (0, 1):
+        raise Unsafe("cannot resolve release source")
+    is_tag = target != "main" and result.returncode == 0
+    local_ref = tag if is_tag else "refs/remotes/origin/" + target
+    source_ref = ("tags/" if is_tag else "heads/") + target
+    source_ref_sha = signing.run(["git", "rev-parse", "--verify", local_ref]).strip()
+    expected = signing.run(["git", "rev-parse", "--verify",
+                            local_ref + ("~1^{commit}" if is_tag else "^{commit}")]).strip()
+    source_sha = signing.run(["git", "rev-parse", "HEAD"]).strip()
+    if source_sha != expected:
+        raise Unsafe("release checkout does not match the selected source")
+    if target == "main" and source_sha != os.environ.get("GITHUB_SHA"):
+        raise Unsafe("main changed since workflow dispatch; start a new run")
+    print("source-sha=" + source_sha)
+    print("source-ref=" + source_ref)
+    print("source-ref-sha=" + source_ref_sha)
+
+
+def check_source():
+    """Reject a moved source ref while retaining the exact validated package data."""
+    repository = os.environ.get("GITHUB_REPOSITORY", "")
+    source_sha = os.environ.get("RELEASE_SOURCE_SHA", "")
+    source_ref = os.environ.get("RELEASE_SOURCE_REF", "")
+    source_ref_sha = os.environ.get("RELEASE_SOURCE_REF_SHA", "")
+    if (not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository)
+            or not re.fullmatch(r"[0-9a-f]{40}", source_sha)
+            or not re.fullmatch(r"[0-9a-f]{40}", source_ref_sha)
+            or not source_ref.startswith(("heads/", "tags/"))):
+        raise Unsafe("missing or invalid validated source")
+    signing.run(["git", "check-ref-format", "refs/" + source_ref])
+    if source_ref.startswith("heads/") and source_sha != source_ref_sha:
+        raise Unsafe("validated branch source does not match its recorded ref")
+    endpoint = "repos/" + repository + "/git/ref/" + urllib.parse.quote(source_ref, safe="/")
+    remote = json.loads(signing.run(["gh", "api", endpoint]))
+    if remote.get("ref") != "refs/" + source_ref or remote.get("object", {}).get("sha") != source_ref_sha:
+        raise Unsafe("release source changed after validation; start a new run")
+    version = os.environ.get("RELEASE_VERSION", "")
+    if version:
+        endpoint = "repos/" + repository + "/git/matching-refs/tags/" + urllib.parse.quote(version, safe="")
+        tags = json.loads(signing.run(["gh", "api", endpoint]))
+        if not isinstance(tags, list) or any(tag.get("ref") == "refs/tags/" + version for tag in tags):
+            raise Unsafe("release tag already exists; do not replace a published release")
 
 
 def secret_forms(env):
@@ -339,20 +418,26 @@ def capture(command, env, forms, logs, interrupted):
 
 
 def verify_outputs():
+    import history
+    prepared = history.verify()
     output = Path(os.environ.get("PACKAGE_OUTPUT_DIR", "nupkgs")).resolve()
     packages = sorted(output.glob("*.nupkg"))
     checksum = output / "SHA256SUMS"
     if not packages or any(not re.fullmatch(r"[A-Za-z0-9_.+-]+\.nupkg", p.name) for p in packages):
         raise Unsafe("expected release packages")
-    artifacts = [*packages, checksum]
-    if any(p.is_symlink() or not p.is_file() for p in artifacts):
+    manifest = history.manifest_path().resolve()
+    bundle = manifest.with_suffix(".bundle")
+    if [package.name for package in packages] != ["ScyllaDB.Alternator." + prepared["version"] + ".nupkg"]:
+        raise Unsafe("packages do not match the prepared release version")
+    artifacts = [*packages, manifest, checksum]
+    if any(p.is_symlink() or not p.is_file() for p in [*artifacts, bundle]):
         raise Unsafe("release artifacts must be regular files")
     with signing.public_environment() as env:
         for artifact in artifacts:
             signing.verify_status(signing.gpg("--status-fd", "1", "--verify",
                                              str(artifact) + ".asc", artifact, env=env))
     expected = []
-    for package in packages:
+    for package in sorted([*packages, bundle, manifest]):
         digest = hashlib.sha256()
         with package.open("rb") as stream:
             for chunk in iter(lambda: stream.read(65536), b""):
@@ -398,6 +483,12 @@ def main():
             if sys.argv[1:] == ["check-target"]:
                 check_target()
                 return 0
+            if sys.argv[1:] == ["record-source"]:
+                record_source()
+                return 0
+            if sys.argv[1:] == ["check-source"]:
+                check_source()
+                return 0
             logs = Path(os.environ.get("RELEASE_LOG_DIR", "/tmp/alternator-release-logs"))
             if sys.argv[1:] == ["publish"]:
                 # Independently callable publication requires public verification;
@@ -423,7 +514,7 @@ def main():
                 env = signing.build_environment()
                 env["DOTNET_FORMAT_VERBOSITY"] = "normal"
                 return capture(sys.argv[2:], env, secret_forms(os.environ), logs, interrupted)
-            raise Unsafe("expected run COMMAND, publish, check-user, check-target, checkout-target, or check-environment")
+            raise Unsafe("expected run COMMAND, publish, check-user, check-target, record-source, check-source, checkout-target, or check-environment")
     except (Unsafe, signing.SigningError):
         print("Release safety check failed; values withheld.", file=sys.stderr)
     except Exception:

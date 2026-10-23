@@ -6,6 +6,7 @@ MAKEFILE_PATH ?= $(abspath $(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
 RELEASE_MAKEFILE ?= $(abspath $(firstword $(MAKEFILE_LIST)))
 RELEASE_GUARD ?= $(dir $(RELEASE_MAKEFILE))scripts/release/guard.py
 RELEASE_SIGNING_HELPER ?= $(dir $(RELEASE_MAKEFILE))scripts/release/signing.py
+RELEASE_HISTORY ?= $(dir $(RELEASE_MAKEFILE))scripts/release/history.py
 
 DOTNET_VERBOSITY := normal
 DOTNET_FORMAT_VERBOSITY ?= diagnostic
@@ -29,8 +30,9 @@ PACKAGE_OUTPUT_DIR ?= $(MAKEFILE_PATH)/nupkgs
 NUGET_SOURCE ?= https://api.nuget.org/v3/index.json
 RELEASE_SKIP_TESTS ?= false
 RELEASE_VERSION ?=
-export MAKEFILE_PATH RELEASE_MAKEFILE RELEASE_SIGNING_HELPER RELEASE_GUARD
-export RELEASE_VERSION RELEASE_SKIP_TESTS PACKAGE_OUTPUT_DIR NUGET_SOURCE
+RELEASE_NEXT_VERSION ?=
+export MAKEFILE_PATH RELEASE_MAKEFILE RELEASE_SIGNING_HELPER RELEASE_GUARD RELEASE_HISTORY
+export RELEASE_VERSION RELEASE_NEXT_VERSION RELEASE_SKIP_TESTS PACKAGE_OUTPUT_DIR NUGET_SOURCE
 PACK_VERSION_ARGS :=
 ifneq ($(strip $(RELEASE_VERSION)),)
 	PACK_VERSION_ARGS := /p:Version=$(RELEASE_VERSION) /p:PackageVersion=$(RELEASE_VERSION)
@@ -192,6 +194,7 @@ test-all: test
 .PHONY: release-prepare
 release-prepare: release-check-user
 	+$(MAKE) -f "$(RELEASE_MAKEFILE)" release-build
+	+$(MAKE) -f "$(RELEASE_MAKEFILE)" release-history
 	+$(MAKE) -f "$(RELEASE_MAKEFILE)" release-sign
 
 .PHONY: release-check-user
@@ -200,22 +203,36 @@ release-check-user:
 
 .PHONY: release-build _release-build _release-clean-outputs
 release-build: release-check-user
+	@python3 "$(RELEASE_HISTORY)" plan
 	+python3 "$(RELEASE_GUARD)" run $(MAKE) -f "$(RELEASE_MAKEFILE)" _release-build
 
 _release-clean-outputs: release-check-user
 	@: "$${PACKAGE_OUTPUT_DIR:?PACKAGE_OUTPUT_DIR must not be empty}"
-	rm -f -- "$$PACKAGE_OUTPUT_DIR"/*.nupkg "$$PACKAGE_OUTPUT_DIR"/*.nupkg.asc "$$PACKAGE_OUTPUT_DIR/SHA256SUMS" "$$PACKAGE_OUTPUT_DIR/SHA256SUMS.asc"
+	rm -f -- "$$PACKAGE_OUTPUT_DIR"/*.nupkg "$$PACKAGE_OUTPUT_DIR"/*.nupkg.asc "$$PACKAGE_OUTPUT_DIR/SHA256SUMS" "$$PACKAGE_OUTPUT_DIR/SHA256SUMS.asc" "$$PACKAGE_OUTPUT_DIR/release-history.json.asc"
 
 _release-build: _release-clean-outputs
+	export RELEASE_VERSION=$$(python3 "$(RELEASE_HISTORY)" version)
+	$(MAKE) -f "$(RELEASE_MAKEFILE)" build check
 	@if [[ "$(RELEASE_SKIP_TESTS)" != "true" ]] && [[ "$(RELEASE_SKIP_TESTS)" != "1" ]]; then \
-		$(MAKE) -f "$(RELEASE_MAKEFILE)" build check test-unit; \
+		$(MAKE) -f "$(RELEASE_MAKEFILE)" test-unit; \
 	fi
 	$(MAKE) -f "$(RELEASE_MAKEFILE)" try-get
 
 .PHONY: release-sign
 release-sign: release-check-user
-	(export LC_ALL=C; cd "$(PACKAGE_OUTPUT_DIR)" && sha256sum -- *.nupkg > SHA256SUMS)
-	python3 "$(RELEASE_SIGNING_HELPER)" exec python3 "$(RELEASE_SIGNING_HELPER)" sign-files "$(PACKAGE_OUTPUT_DIR)"/*.nupkg "$(PACKAGE_OUTPUT_DIR)/SHA256SUMS"
+	python3 "$(RELEASE_HISTORY)" verify
+	(export LC_ALL=C; cd "$(PACKAGE_OUTPUT_DIR)" && sha256sum -- *.nupkg release-history.bundle release-history.json > SHA256SUMS)
+	python3 "$(RELEASE_SIGNING_HELPER)" exec python3 "$(RELEASE_SIGNING_HELPER)" sign-files "$(PACKAGE_OUTPUT_DIR)"/*.nupkg "$(PACKAGE_OUTPUT_DIR)/release-history.json" "$(PACKAGE_OUTPUT_DIR)/SHA256SUMS"
+
+.PHONY: release-history release-verify-history release-push-history
+release-history: release-check-user
+	python3 "$(RELEASE_SIGNING_HELPER)" exec python3 "$(RELEASE_HISTORY)" create
+
+release-verify-history: release-check-user
+	python3 "$(RELEASE_HISTORY)" verify
+
+release-push-history: release-check-user
+	python3 "$(RELEASE_HISTORY)" push
 
 .PHONY: test-release-signing
 test-release-signing:

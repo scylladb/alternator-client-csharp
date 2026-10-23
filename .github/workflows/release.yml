@@ -10,7 +10,7 @@ on:
 
       skip-tests:
         type: boolean
-        description: 'skip-tests: do not run tests while releasing'
+        description: 'skip project tests; build, formatting, and release-helper checks always run'
         default: false
 
       target-tag:
@@ -22,6 +22,11 @@ on:
         required: false
         type: string
         description: 'release-version: override package version'
+
+      next-version:
+        required: false
+        type: string
+        description: 'next numeric development version; defaults to the next patch with a dev suffix'
 
 jobs:
   validate:
@@ -36,17 +41,24 @@ jobs:
 
     outputs:
       package-artifact-id: ${{ steps.packages.outputs.artifact-id }}
+      source-sha: ${{ steps.source.outputs.source-sha }}
+      source-ref: ${{ steps.source.outputs.source-ref }}
+      source-ref-sha: ${{ steps.source.outputs.source-ref-sha }}
+      release-version: ${{ steps.plan.outputs.version }}
+      next-version: ${{ steps.plan.outputs.next-version }}
+      release-tree: ${{ steps.plan.outputs.release-tree }}
 
     env:
       IS_CICD: 1
       RELEASE_SKIP_TESTS: ${{ inputs.skip-tests }}
       RELEASE_VERSION: ${{ inputs.release-version }}
+      RELEASE_NEXT_VERSION: ${{ inputs.next-version }}
       RELEASE_TARGET_TAG: ${{ inputs.target-tag }}
       MAKEFILE_PATH: ${{ github.workspace }}
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
@@ -56,6 +68,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/release/guard.py check-environment
+
+      - name: Test trusted release helpers
+        run: make test-release-signing
 
       - name: Block release with open release blockers
         if: inputs.dry-run == false
@@ -82,17 +97,17 @@ jobs:
         run: |
           mkdir -m 700 -p "$RUNNER_TEMP/release-policy/scripts/release"
           cp Makefile "$RUNNER_TEMP/release-policy/"
-          cp scripts/release/signing.py scripts/release/guard.py scripts/release/publisher.asc "$RUNNER_TEMP/release-policy/scripts/release/"
+          cp scripts/release/signing.py scripts/release/guard.py scripts/release/history.py scripts/release/publisher.asc "$RUNNER_TEMP/release-policy/scripts/release/"
 
       - name: Checkout selected release target
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           ref: ${{ inputs.target-tag }}
           fetch-depth: 0
           persist-credentials: false
 
       - name: Set up .NET
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         with:
           dotnet-version: 8.0.x
 
@@ -103,22 +118,34 @@ jobs:
       - name: Validate selected release target
         run: python3 "$RUNNER_TEMP/release-policy/scripts/release/guard.py" check-target
 
+      - name: Record selected release source
+        id: source
+        run: python3 "$RUNNER_TEMP/release-policy/scripts/release/guard.py" record-source >> "$GITHUB_OUTPUT"
+
+      - name: Plan release versions and source tree
+        id: plan
+        run: python3 "$RUNNER_TEMP/release-policy/scripts/release/history.py" plan >> "$GITHUB_OUTPUT"
+
       - name: Restore
         run: python3 "$RUNNER_TEMP/release-policy/scripts/release/guard.py" run dotnet restore ScyllaDB.Alternator.sln --verbosity minimal
 
       - name: Build and check release artifacts
+        env:
+          RELEASE_VERSION: ${{ steps.plan.outputs.version }}
+          RELEASE_NEXT_VERSION: ${{ steps.plan.outputs.next-version }}
+          RELEASE_EXPECTED_TREE: ${{ steps.plan.outputs.release-tree }}
         run: make -f "$RUNNER_TEMP/release-policy/Makefile" release-build
 
       - name: Upload validated packages
         id: packages
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: validated-packages-${{ github.run_attempt }}
           path: nupkgs/*.nupkg
           if-no-files-found: error
 
       - name: Upload sanitized validation logs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: validation-logs-${{ github.run_attempt }}
@@ -133,7 +160,7 @@ jobs:
 
     permissions:
       actions: read
-      contents: read
+      contents: write
       issues: read
       id-token: write
 
@@ -141,21 +168,43 @@ jobs:
       IS_CICD: 1
       MAKEFILE_PATH: ${{ github.workspace }}
       PACKAGE_OUTPUT_DIR: ${{ github.workspace }}/nupkgs
+      RELEASE_SOURCE_SHA: ${{ needs.validate.outputs.source-sha }}
+      RELEASE_SOURCE_REF: ${{ needs.validate.outputs.source-ref }}
+      RELEASE_SOURCE_REF_SHA: ${{ needs.validate.outputs.source-ref-sha }}
+      RELEASE_BASE_COMMIT: ${{ needs.validate.outputs.source-sha }}
+      RELEASE_VERSION: ${{ needs.validate.outputs.release-version }}
+      RELEASE_NEXT_VERSION: ${{ needs.validate.outputs.next-version }}
+      RELEASE_EXPECTED_TREE: ${{ needs.validate.outputs.release-tree }}
 
     steps:
       - name: Checkout trusted release tools
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           ref: ${{ github.sha }}
-          persist-credentials: false
+          fetch-depth: 0
 
       - name: Validate release environment protection
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/release/guard.py check-environment
 
+      - name: Preserve trusted release tools
+        run: |
+          mkdir -m 700 -p "$RUNNER_TEMP/release-policy/scripts/release"
+          cp Makefile "$RUNNER_TEMP/release-policy/"
+          cp scripts/release/signing.py scripts/release/guard.py scripts/release/history.py scripts/release/publisher.asc "$RUNNER_TEMP/release-policy/scripts/release/"
+
+      - name: Fetch validated source without executing project code
+        run: |
+          [[ "$RELEASE_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          git fetch --no-tags origin "$RELEASE_SOURCE_SHA"
+          git -c core.hooksPath=/dev/null checkout --detach "$RELEASE_SOURCE_SHA"
+
+      - name: Reconstruct validated release plan
+        run: python3 "$RUNNER_TEMP/release-policy/scripts/release/history.py" plan
+
       - name: Download validated packages as data
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           artifact-ids: ${{ needs.validate.outputs.package-artifact-id }}
           path: nupkgs
@@ -163,15 +212,29 @@ jobs:
 
       - name: Set up .NET for publication
         if: inputs.dry-run == false
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         with:
           dotnet-version: 8.0.x
+
+      - name: Check validated source before signing
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 "$RUNNER_TEMP/release-policy/scripts/release/guard.py" check-source
+
+      - name: Prepare signed release commits and tag
+        env:
+          RELEASE_GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          RELEASE_GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: make -f "$RUNNER_TEMP/release-policy/Makefile" release-history
+
+      - name: Verify prepared history with public key only
+        run: make -f "$RUNNER_TEMP/release-policy/Makefile" release-verify-history
 
       - name: Sign and verify NuGet packages and checksums
         env:
           RELEASE_GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
           RELEASE_GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
-        run: make release-sign
+        run: make -f "$RUNNER_TEMP/release-policy/Makefile" release-sign
 
       - name: Recheck for open release blockers
         if: inputs.dry-run == false
@@ -194,6 +257,12 @@ jobs:
             exit 1
           fi
 
+      - name: Check validated source before publication
+        if: inputs.dry-run == false
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 "$RUNNER_TEMP/release-policy/scripts/release/guard.py" check-source
+
       - name: Authenticate NuGet trusted publisher
         if: inputs.dry-run == false
         id: nuget-login
@@ -205,14 +274,18 @@ jobs:
         if: inputs.dry-run == false
         env:
           NUGET_PUBLISH_TOKEN: ${{ steps.nuget-login.outputs.NUGET_API_KEY }}
-        run: make release-push
+        run: make -f "$RUNNER_TEMP/release-policy/Makefile" release-push
+
+      - name: Publish verified release history
+        if: inputs.dry-run == false
+        run: make -f "$RUNNER_TEMP/release-policy/Makefile" release-push-history
 
       - name: Perform release dry-run
         if: inputs.dry-run == true
-        run: make release-dry-run-summary
+        run: make -f "$RUNNER_TEMP/release-policy/Makefile" release-dry-run-summary
 
       - name: Upload NuGet package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: nuget-package-${{ github.run_attempt }}
@@ -221,9 +294,12 @@ jobs:
             nupkgs/*.nupkg.asc
             nupkgs/SHA256SUMS
             nupkgs/SHA256SUMS.asc
+            nupkgs/release-history.json
+            nupkgs/release-history.json.asc
+            nupkgs/release-history.bundle
 
       - name: Upload sanitized release logs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: release-logs-${{ github.run_attempt }}
