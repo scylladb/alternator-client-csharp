@@ -93,11 +93,11 @@ def check_command(command):
     for index, argument in enumerate(command[1:], 1):
         if (re.search(r"(?i)(?:^[-/](?:p|property):|^--?)(?:[^=]*(?:password|passphrase|token|secret|api[-_]?key|authorization)[^=]*)(?:=|$)", argument)
                 or re.match(r"(?i)^[-/](?:bl|binarylogger|fl|filelogger)(?:[:=0-9]|$)", argument)
-                or re.match(r"(?i)^(?:[-/]v(?:erbosity)?[:=]|--verbosity=)(?:diag(?:nostic)?|detailed)$", argument)
+                or re.match(r"(?i)^(?:[-/]v(?:erbosity)?[:=]|--verbosity=)(?:diag(?:nostic)?|d(?:etailed)?)$", argument)
                 or argument.lower() in ("--debug", "-x")):
             raise Unsafe("debug logging or credential-bearing command properties are disabled")
         if argument.lower() in ("--verbosity", "-v") and index + 1 < len(command):
-            if command[index + 1].lower() in ("diag", "diagnostic", "detailed"):
+            if command[index + 1].lower() in ("diag", "diagnostic", "d", "detailed"):
                 raise Unsafe("debug logging is disabled")
 
 

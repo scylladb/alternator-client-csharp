@@ -135,6 +135,11 @@ class PolicyTests(unittest.TestCase):
         for capability in ("secrets.", "id-token:", "NUGET_PUBLISH_TOKEN", "NuGet/login"):
             self.assertNotIn(capability, validation)
         self.assertIn("    environment: release\n", release)
+        preflight = "run: python3 scripts/release/guard.py check-environment"
+        self.assertIn(preflight, validation)
+        self.assertLess(validation.index(preflight), validation.index("Checkout selected release target"))
+        self.assertIn(preflight, release)
+        self.assertLess(release.index(preflight), release.index("Sign and verify NuGet packages and checksums"))
         self.assertIn("          ref: ${{ github.sha }}\n", release)
         self.assertNotIn("inputs.target-tag", release)
         for executable in ("release-build", "release-prepare", "dotnet restore", "dotnet test",
@@ -177,11 +182,14 @@ class PolicyTests(unittest.TestCase):
                 self.assertNotIn(value, output.getvalue())
 
     def test_debug_and_credential_options_are_rejected(self):
-        for args in (["--verbosity", "diagnostic"], ["-v:diag"], ["/bl:build.binlog"],
+        for args in (["--verbosity", "diagnostic"], ["-v:diag"],
+                     ["-v:d"], ["-v", "d"], ["--verbosity=d"], ["-verbosity:d"], ["/v:D"],
+                     ["/bl:build.binlog"],
                      ["/fl"], ["/p:Password=private"], ["--api-key", "private"]):
             with self.subTest(args=args), self.assertRaises(guard.Unsafe):
                 guard.check_command(["dotnet", "build", *args])
         guard.check_command(["dotnet", "restore", "--verbosity", "minimal"])
+        guard.check_command(["dotnet", "build", "-v:normal"])
 
     def test_protected_environment_fails_closed_on_weaker_settings(self):
         environment = {"can_admins_bypass": False,
@@ -214,7 +222,8 @@ class PolicyTests(unittest.TestCase):
                 invalid.append(candidate)
             for candidate in invalid:
                 with self.subTest(environment=candidate), \
-                        patch.object(signing, "run", return_value=json.dumps(candidate)), self.assertRaises(guard.Unsafe):
+                        patch.object(signing, "run", side_effect=[json.dumps(candidate), json.dumps(branches)]), \
+                        self.assertRaises(guard.Unsafe):
                     guard.check_environment()
             for branch in [{"total_count": 0, "branch_policies": []},
                            {"total_count": 1, "branch_policies": [{"name": "*", "type": "branch"}]},

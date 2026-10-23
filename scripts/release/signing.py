@@ -168,7 +168,7 @@ def passphrase_value(env):
     if "RELEASE_GPG_PASSPHRASE_FILE" in env:
         value = Path(env["RELEASE_GPG_PASSPHRASE_FILE"]).read_text().removesuffix("\n")
     if not value or "\n" in value or "\r" in value or len(value.encode()) > 1024:
-        raise SigningError("Release signing requires a nonempty single-line passphrase.")
+        raise SigningError("Release signing requires a nonempty single-line passphrase of at most 1024 UTF-8 bytes.")
     return value
 
 

@@ -616,6 +616,16 @@ class BuildEnvironmentTests(unittest.TestCase):
 
 
 class DiagnosticTests(unittest.TestCase):
+    def test_passphrase_diagnostic_states_existing_utf8_byte_limit(self):
+        for value in ("a" * 1024, "é" * 512):
+            with self.subTest(bytes=len(value.encode())):
+                self.assertEqual(signing.passphrase_value({"RELEASE_GPG_PASSPHRASE": value}), value)
+        for value in ("a" * 1025, "é" * 512 + "x"):
+            with self.subTest(bytes=len(value.encode())), \
+                    self.assertRaisesRegex(signing.SigningError, "at most 1024 UTF-8 bytes") as error:
+                signing.passphrase_value({"RELEASE_GPG_PASSPHRASE": value})
+            self.assertNotIn(value, str(error.exception))
+
     def test_failed_commands_identify_operations_without_unsafe_values(self):
         sentinel = "DO-NOT-DISCLOSE"
         result = subprocess.CompletedProcess([], 17, sentinel, sentinel)

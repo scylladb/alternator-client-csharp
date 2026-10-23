@@ -9,7 +9,8 @@ The public certificate in `publisher.asc` is safe to commit and is registered on
 * Expiration: `2028-10-19T15:45:41+00:00`
 
 Protected `release` environment secrets `GPG_PRIVATE_KEY` (ASCII-armored protected
-signing-subkey export) and `GPG_PASSPHRASE` (single-line passphrase) supply release signing.
+signing-subkey export) and `GPG_PASSPHRASE` (nonempty single-line passphrase, at most
+1024 UTF-8 bytes) supply release signing.
 Never upload the full primary private-key backup to CI. Packages and checksums use
 the signing subkey, selected by its complete fingerprint with `!`. The primary key
 certifies the signing subkey and remains offline.
