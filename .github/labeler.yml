@@ -1,0 +1,5 @@
+omit-from-release-notes:
+  - changed-files:
+      - all-globs-to-all-files:
+          # One union must match every filename, including mixed docs/test/CI PRs.
+          - '{UnitTests/**,IntegrationTests/**,.github/workflows/**,.github/labeler.yml,.github/release.yml,.github/RELEASE_NOTES.md,README.md,scripts/release/SIGNING.md,scripts/release/test_*.py}'
