@@ -15,7 +15,7 @@ on:
 
       target-tag:
         type: string
-        description: 'target-tag: tag or branch name to release. Use to re-release tagged releases'
+        description: 'source branch/tag for dry runs; only main can publish new packages'
         default: main
 
       release-version:
@@ -69,6 +69,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/release/guard.py check-environment
 
+      - name: Reject non-main package publication before preparation
+        if: inputs.dry-run == false
+        run: python3 scripts/release/guard.py check-publication-target
+
       - name: Test trusted release helpers
         run: make test-release-signing
 
@@ -97,7 +101,7 @@ jobs:
         run: |
           mkdir -m 700 -p "$RUNNER_TEMP/release-policy/scripts/release"
           cp Makefile "$RUNNER_TEMP/release-policy/"
-          cp scripts/release/signing.py scripts/release/guard.py scripts/release/history.py scripts/release/publisher.asc "$RUNNER_TEMP/release-policy/scripts/release/"
+          cp scripts/release/signing.py scripts/release/guard.py scripts/release/history.py scripts/release/github_release.py scripts/release/publisher.asc "$RUNNER_TEMP/release-policy/scripts/release/"
 
       - name: Checkout selected release target
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -192,7 +196,7 @@ jobs:
         run: |
           mkdir -m 700 -p "$RUNNER_TEMP/release-policy/scripts/release"
           cp Makefile "$RUNNER_TEMP/release-policy/"
-          cp scripts/release/signing.py scripts/release/guard.py scripts/release/history.py scripts/release/publisher.asc "$RUNNER_TEMP/release-policy/scripts/release/"
+          cp scripts/release/signing.py scripts/release/guard.py scripts/release/history.py scripts/release/github_release.py scripts/release/publisher.asc "$RUNNER_TEMP/release-policy/scripts/release/"
 
       - name: Fetch validated source without executing project code
         run: |
@@ -263,6 +267,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: python3 "$RUNNER_TEMP/release-policy/scripts/release/guard.py" check-source
 
+      - name: Validate GitHub release source before publication
+        if: inputs.dry-run == false
+        run: python3 "$RUNNER_TEMP/release-policy/scripts/release/github_release.py" check-source
+
       - name: Authenticate NuGet trusted publisher
         if: inputs.dry-run == false
         id: nuget-login
@@ -279,6 +287,12 @@ jobs:
       - name: Publish verified release history
         if: inputs.dry-run == false
         run: make -f "$RUNNER_TEMP/release-policy/Makefile" release-push-history
+
+      - name: Create GitHub release with filtered generated notes
+        if: inputs.dry-run == false
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 "$RUNNER_TEMP/release-policy/scripts/release/github_release.py"
 
       - name: Perform release dry-run
         if: inputs.dry-run == true

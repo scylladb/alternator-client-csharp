@@ -92,6 +92,11 @@ def check_inputs():
             raise Unsafe("MSBuild debug output is disabled")
 
 
+def check_publication_target():
+    if os.environ.get("RELEASE_TARGET_TAG", "main") != "main":
+        raise Unsafe("new package publication requires main; use a dry run for historical sources")
+
+
 def property_names(value):
     """Find grouped MSBuild keys, splitting only outside its double quotes."""
     parts = []
@@ -480,6 +485,9 @@ def main():
                 checkout_target()
                 return 0
             check_inputs()
+            if sys.argv[1:] == ["check-publication-target"]:
+                check_publication_target()
+                return 0
             if sys.argv[1:] == ["check-target"]:
                 check_target()
                 return 0
@@ -491,6 +499,8 @@ def main():
                 return 0
             logs = Path(os.environ.get("RELEASE_LOG_DIR", "/tmp/alternator-release-logs"))
             if sys.argv[1:] == ["publish"]:
+                if os.environ.get("RELEASE_SOURCE_REF") != "heads/main":
+                    raise Unsafe("new package publication requires the validated main source")
                 # Independently callable publication requires public verification;
                 # it never imports private signing credentials.
                 packages = verify_outputs()
