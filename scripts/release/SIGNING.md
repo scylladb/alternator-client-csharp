@@ -105,8 +105,11 @@ OIDC permission. It always runs the trusted release helper tests from the workfl
 revision, including when project tests are skipped. It preserves the current Makefile,
 signing helper, log guard, and certificate outside the checkout before selecting an older release target. A branch
 input selects its tip; a tag input selects its preceding commit, preserving the existing rerun
-behavior. Existing tags remain untouched. A historical rebuild needs a new unused
-release version; it must not replace the selected tag or another published tag.
+behavior. Existing tags remain untouched. Historical preparation and dry runs need
+a new unused version; they must not replace the selected tag or another published
+tag. New NuGet package publication is supported only from `main`. A non-main
+publication request is rejected before target checkout or release preparation;
+the directly callable publisher also requires the validated `main` source.
 Selected targets must retain the .NET 8 `ScyllaDB.Alternator` package project policy.
 Always invoke the preserved Makefile with `make -f` after changing revisions; the
 checkout helper no longer overwrites historical files or deletes local tags.
@@ -139,8 +142,8 @@ the verified development commit to `refs/heads/main` and the signed tag together
 The push uses an explicit destination, an atomic ref update, and a lease requiring
 remote `main` to equal the original baseline. A concurrently advanced or rewritten
 branch, existing tag, or rejected ref leaves both remote refs unchanged. Git pushes
-disable hooks. Historical targets retain history in the artifact without pushing
-to `main`. Local preparation leaves refs local; `release-push-history` is a separate,
+disable hooks. Historical dry runs retain history in the artifact without publishing
+packages or remote refs. Local preparation leaves refs local; `release-push-history` is a separate,
 explicit operation. The workflow's Git token has write permission only in the
 protected release job; validation remains read-only.
 
@@ -197,6 +200,18 @@ but the final Git push failed, preserve the retained signed package and history
 artifacts, inspect both destinations, and reconcile the verified history before
 starting a new release. Do not force a tag, rewrite the advanced branch, or assume
 a rebuilt duplicate package is the originally published package.
+
+If GitHub release-note creation fails after the package and signed history were
+published, use the protected **Recover GitHub release notes** workflow with the
+original release run ID and artifact attempt. It downloads the retained artifact
+as data, verifies the signed manifest and both signed history commits and tag with
+the pinned public certificate, and compares the exact tag object with GitHub.
+Only a missing GitHub release is created; an existing published release is left
+unchanged and drafts are rejected. Recovery does not build, sign, publish packages,
+or push Git refs and needs no private signing credentials or NuGet token.
+Missing, expired, tampered, or mismatched retained history blocks recovery.
+See [the release-note procedure](../../.github/RELEASE_NOTES.md) for manual
+pre-release classification verification and recovery operation.
 
 ## NuGet signatures
 
