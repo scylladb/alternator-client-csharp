@@ -71,7 +71,7 @@ namespace ScyllaDB.Alternator
                 .WithDatacenter("dc1")
                 .WithRack("rack1");
 
-            Assert.Throws<InvalidOperationException>(() => builder.Build());
+            Assert.Throws<InvalidOperationException>(new Action(() => builder.Build()));
         }
 
         [Test]

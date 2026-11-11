@@ -69,8 +69,8 @@ namespace ScyllaDB.Alternator
             Assert.That(RackScope.of("dc1", "rack1", DatacenterScope.of("dc1", ClusterScope.create())), Is.EqualTo(rack));
             Assert.That(RackScope.of("dc1", "rack2", datacenter), Is.Not.EqualTo(rack));
 
-            Assert.Throws<ArgumentException>(() => DatacenterScope.of(string.Empty, null));
-            Assert.Throws<ArgumentException>(() => RackScope.of("dc1", string.Empty, null));
+            Assert.Throws<ArgumentException>(new Action(() => DatacenterScope.of(string.Empty, null)));
+            Assert.Throws<ArgumentException>(new Action(() => RackScope.of("dc1", string.Empty, null)));
         }
 
         [Test]
@@ -108,8 +108,8 @@ namespace ScyllaDB.Alternator
             Assert.That(config.getType(), Is.EqualTo(KeyRouteAffinity.Rmw));
             Assert.That(config.getPkInfoPerTable()["orders"], Is.EqualTo("order_id"));
             Assert.That(config.getPkInfoPerTable()["users"], Is.EqualTo("user_id"));
-            Assert.Throws<NotSupportedException>(() =>
-                ((IDictionary<string, string>)config.getPkInfoPerTable()).Add("products", "product_id"));
+            Assert.Throws<NotSupportedException>(new Action(() =>
+                ((IDictionary<string, string>)config.getPkInfoPerTable()).Add("products", "product_id")));
             Assert.That(KeyRouteAffinityConfig.of(null).isEnabled(), Is.False);
         }
 
@@ -134,18 +134,18 @@ namespace ScyllaDB.Alternator
             Assert.That(config.getRequiredHeaders(), Does.Not.Contain("User-Agent"));
             Assert.That(config.getRequiredHeaders(), Does.Not.Contain("Authorization"));
             Assert.That(config.getMaxConnections(), Is.EqualTo(50));
-            Assert.Throws<NotSupportedException>(() =>
-                ((ISet<string>)config.getRequiredHeaders()).Add("X-Test"));
+            Assert.Throws<NotSupportedException>(new Action(() =>
+                ((ISet<string>)config.getRequiredHeaders()).Add("X-Test")));
 
-            Assert.Throws<ArgumentException>(() => AlternatorConfig.builder()
+            Assert.Throws<ArgumentException>(new Action(() => AlternatorConfig.builder()
                 .withMinCompressionSizeBytes(-1)
-                .build());
-            Assert.Throws<ArgumentException>(() => AlternatorConfig.builder()
+                .build()));
+            Assert.Throws<ArgumentException>(new Action(() => AlternatorConfig.builder()
                 .withMaxConnections(0)
-                .build());
-            Assert.Throws<ArgumentException>(() => AlternatorConfig.builder()
+                .build()));
+            Assert.Throws<ArgumentException>(new Action(() => AlternatorConfig.builder()
                 .withHeadersWhitelist(new[] { "Host" })
-                .build());
+                .build()));
         }
 
         [Test]
@@ -170,9 +170,9 @@ namespace ScyllaDB.Alternator
             Assert.That(splitTimeouts.ConnectionTimeoutMs, Is.EqualTo(11000));
             Assert.That(splitTimeouts.HttpClientTimeoutMs, Is.EqualTo(12000));
 
-            Assert.Throws<ArgumentException>(() => AlternatorConfig.builder()
+            Assert.Throws<ArgumentException>(new Action(() => AlternatorConfig.builder()
                 .withHttpClientTimeoutMs(-1)
-                .build());
+                .build()));
         }
 
         [Test]
@@ -225,17 +225,17 @@ namespace ScyllaDB.Alternator
         [Test]
         public void AlternatorConfigBuilderValidatesCustomHeaderOptimizerTest()
         {
-            Assert.Throws<ArgumentNullException>(() => AlternatorConfig.builder()
-                .withCustomOptimizeHeaders(null!));
+            Assert.Throws<ArgumentNullException>(new Action(() => AlternatorConfig.builder()
+                .withCustomOptimizeHeaders(null!)));
 
-            var missingRequired = Assert.Throws<ArgumentException>(() => AlternatorConfig.builder()
+            var missingRequired = Assert.Throws<ArgumentException>(new Action(() => AlternatorConfig.builder()
                 .withCustomOptimizeHeaders(_ => new[] { "Host" })
-                .build());
+                .build()));
             Assert.That(missingRequired!.Message, Does.Contain("Custom header optimizer is missing required headers"));
 
-            var nullHeaders = Assert.Throws<ArgumentException>(() => AlternatorConfig.builder()
+            var nullHeaders = Assert.Throws<ArgumentException>(new Action(() => AlternatorConfig.builder()
                 .withCustomOptimizeHeaders(_ => null!)
-                .build());
+                .build()));
             Assert.That(nullHeaders!.Message, Does.Contain("Custom header optimizer cannot return null"));
         }
 
@@ -262,11 +262,11 @@ namespace ScyllaDB.Alternator
                 .build();
             Assert.That(disabled.ResponseCompressionAlgorithms, Is.Empty);
 
-            Assert.Throws<ArgumentNullException>(() => AlternatorConfig.builder()
-                .withResponseCompression((IEnumerable<ResponseCompressionAlgorithm>)null!));
-            Assert.Throws<ArgumentException>(() => AlternatorConfig.builder()
+            Assert.Throws<ArgumentNullException>(new Action(() => AlternatorConfig.builder()
+                .withResponseCompression((IEnumerable<ResponseCompressionAlgorithm>)null!)));
+            Assert.Throws<ArgumentException>(new Action(() => AlternatorConfig.builder()
                 .withResponseCompression((ResponseCompressionAlgorithm)999)
-                .build());
+                .build()));
         }
     }
 }

@@ -51,7 +51,7 @@ namespace ScyllaDB.Alternator
             using var client = lease.Cluster.ClientBuilder(AlternatorTransport.Http).Build();
 
             Assert.That(
-                async () => await unauthorizedClient.ListTablesAsync(),
+                new Func<Task>(async () => await unauthorizedClient.ListTablesAsync()),
                 Throws.InstanceOf<AmazonServiceException>());
             var response = await client.ListTablesAsync();
 

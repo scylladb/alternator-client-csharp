@@ -87,8 +87,8 @@ namespace ScyllaDB.Alternator
                 .build();
             var liveNodes = new AlternatorLiveNodes(config);
 
-            var exception = Assert.Throws<AlternatorLiveNodes.ValidationError>(() =>
-                liveNodes.checkIfRackAndDatacenterSetCorrectly());
+            var exception = Assert.Throws<AlternatorLiveNodes.ValidationError>(new Action(() =>
+                liveNodes.checkIfRackAndDatacenterSetCorrectly()));
             Assert.That(exception, Is.InstanceOf<ValidationError>());
             server.WaitForRequests();
 
@@ -109,8 +109,8 @@ namespace ScyllaDB.Alternator
                 server.Port,
                 ClusterScope.create());
 
-            var exception = Assert.Throws<AlternatorLiveNodes.FailedToCheck>(() =>
-                liveNodes.checkIfRackDatacenterFeatureIsSupported());
+            var exception = Assert.Throws<AlternatorLiveNodes.FailedToCheck>(new Action(() =>
+                liveNodes.checkIfRackDatacenterFeatureIsSupported()));
             Assert.That(exception, Is.InstanceOf<FailedToCheck>());
             server.WaitForRequests();
 
@@ -488,7 +488,7 @@ namespace ScyllaDB.Alternator
                 .withPort(8080)
                 .build();
 
-            Assert.Throws<SystemException>(() => new AlternatorLiveNodes(config));
+            Assert.Throws<SystemException>(new Action(() => new AlternatorLiveNodes(config)));
         }
 
         [Test]
@@ -505,8 +505,8 @@ namespace ScyllaDB.Alternator
             var snapshot = liveNodes.getLiveNodes();
 
             Assert.That(snapshot, Is.EqualTo(new[] { new Uri("http://127.0.0.1:8080") }));
-            Assert.Throws<NotSupportedException>(() =>
-                ((IList<Uri>)snapshot).Add(new Uri("http://127.0.0.2:8080")));
+            Assert.Throws<NotSupportedException>(new Action(() =>
+                ((IList<Uri>)snapshot).Add(new Uri("http://127.0.0.2:8080"))));
             Assert.That(liveNodes.getLiveNodes(), Is.EqualTo(new[] { new Uri("http://127.0.0.1:8080") }));
         }
 

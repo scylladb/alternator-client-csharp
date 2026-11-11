@@ -148,8 +148,8 @@ namespace ScyllaDB.Alternator
             using var disabledHandler = CreateAlternatorSocketsHttpHandler(disabledConfig, _ => { });
             Assert.That(disabledHandler.SslOptions.AllowTlsResume, Is.False);
 
-            var exception = Assert.Throws<NotSupportedException>(() =>
-                CreateAlternatorHttpClientHandler(disabledTlsConfig, 10, _ => { }));
+            var exception = Assert.Throws<NotSupportedException>(new Action(() =>
+                CreateAlternatorHttpClientHandler(disabledTlsConfig, 10, _ => { })));
             Assert.That(exception!.Message, Does.Contain("SocketsHttpHandler"));
         }
 
@@ -218,8 +218,8 @@ namespace ScyllaDB.Alternator
                 .WithDeferredStart()
                 .build();
 
-            Assert.ThrowsAsync<AmazonDynamoDBException>(() => client.ListTablesAsync());
-            Assert.ThrowsAsync<AmazonDynamoDBException>(() => client.ListTablesAsync());
+            Assert.ThrowsAsync<AmazonDynamoDBException>(new Func<Task>(() => client.ListTablesAsync()));
+            Assert.ThrowsAsync<AmazonDynamoDBException>(new Func<Task>(() => client.ListTablesAsync()));
             var result = await client.ListTablesAsync().ConfigureAwait(false);
 
             await server.WaitAsync().ConfigureAwait(false);
@@ -545,7 +545,7 @@ namespace ScyllaDB.Alternator
             alreadyCompressed.Headers["Content-Encoding"] = "br, gzip";
             alreadyCompressedCaseInsensitive.Headers["Content-Encoding"] = "GZip";
 
-            Assert.DoesNotThrow(() => InvokeCompressRequest(zeroThresholdHandler, null));
+            Assert.DoesNotThrow(new Action(() => InvokeCompressRequest(zeroThresholdHandler, null)));
             InvokeCompressRequest(zeroThresholdHandler, emptyContent);
             InvokeCompressRequest(zeroThresholdHandler, bodyless);
             InvokeCompressRequest(zeroThresholdHandler, alreadyCompressed);
