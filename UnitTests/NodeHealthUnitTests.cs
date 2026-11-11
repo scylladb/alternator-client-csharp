@@ -36,18 +36,18 @@ namespace ScyllaDB.Alternator
             Assert.That(liveNodes.getActiveNodes(), Is.Empty);
             Assert.That(liveNodes.getQuarantinedNodes(), Is.Empty);
             Assert.That(liveNodes.getDownNodes(), Is.EqualTo(new[] { node }));
-            Assert.That(liveNodes.getNodeStatus(node) !.State, Is.EqualTo(NodeHealthState.Down));
+            Assert.That(liveNodes.getNodeStatus(node)!.State, Is.EqualTo(NodeHealthState.Down));
 
             liveNodes.reportNodeResult(node, NodeHealthObservation.Success);
 
             Assert.That(liveNodes.getQuarantinedNodes(), Is.EqualTo(new[] { node }));
-            Assert.That(liveNodes.getNodeStatus(node) !.ConsecutiveSuccesses, Is.EqualTo(1));
+            Assert.That(liveNodes.getNodeStatus(node)!.ConsecutiveSuccesses, Is.EqualTo(1));
 
             liveNodes.reportNodeResult(node, NodeHealthObservation.Success);
 
             Assert.That(liveNodes.getActiveNodes(), Is.EqualTo(new[] { node }));
             Assert.That(liveNodes.getQuarantinedNodes(), Is.Empty);
-            Assert.That(liveNodes.getNodeStatus(node) !.State, Is.EqualTo(NodeHealthState.Active));
+            Assert.That(liveNodes.getNodeStatus(node)!.State, Is.EqualTo(NodeHealthState.Active));
         }
 
         [Test]
@@ -63,13 +63,13 @@ namespace ScyllaDB.Alternator
             liveNodes.reportNodeResult(node, NodeHealthObservation.ServerError);
             liveNodes.reportNodeResult(node, NodeHealthObservation.RequestTimeout);
 
-            var activeStatus = liveNodes.getNodeStatus(node) !;
+            var activeStatus = liveNodes.getNodeStatus(node)!;
             Assert.That(activeStatus.State, Is.EqualTo(NodeHealthState.Active));
             Assert.That(activeStatus.ConsecutiveServerErrors, Is.EqualTo(1));
 
             liveNodes.reportNodeResult(node, NodeHealthObservation.ServerError);
 
-            var downStatus = liveNodes.getNodeStatus(node) !;
+            var downStatus = liveNodes.getNodeStatus(node)!;
             Assert.That(downStatus.State, Is.EqualTo(NodeHealthState.Down));
             Assert.That(downStatus.ConsecutiveServerErrors, Is.EqualTo(2));
         }
@@ -151,7 +151,7 @@ namespace ScyllaDB.Alternator
 
             Assert.That(probed, Is.EqualTo(new[] { node }));
             Assert.That(liveNodes.getQuarantinedNodes(), Is.EqualTo(new[] { node }));
-            Assert.That(liveNodes.getNodeStatus(node) !.ConsecutiveSuccesses, Is.EqualTo(1));
+            Assert.That(liveNodes.getNodeStatus(node)!.ConsecutiveSuccesses, Is.EqualTo(1));
             Assert.That(probeHandler.Requests.Single().AbsolutePath, Is.EqualTo("/localnodes"));
         }
 
@@ -195,7 +195,7 @@ namespace ScyllaDB.Alternator
             using var quickResponse = await quickClient.GetAsync(Node("node1.example.com"));
 
             Assert.That(quickResponse.StatusCode, Is.EqualTo(HttpStatusCode.InternalServerError));
-            Assert.That(quickLiveNodes.getNodeStatus(Node("node1.example.com")) !.ConsecutiveServerErrors, Is.EqualTo(1));
+            Assert.That(quickLiveNodes.getNodeStatus(Node("node1.example.com"))!.ConsecutiveServerErrors, Is.EqualTo(1));
 
             using var timeoutPollingHttpClient = CreatePollingClient();
             var timeoutLiveNodes = CreateLiveNodes(
@@ -215,7 +215,7 @@ namespace ScyllaDB.Alternator
             using var timeoutResponse = await timeoutClient.GetAsync(Node("node1.example.com"));
 
             Assert.That(timeoutResponse.StatusCode, Is.EqualTo(HttpStatusCode.InternalServerError));
-            var timeoutStatus = timeoutLiveNodes.getNodeStatus(Node("node1.example.com")) !;
+            var timeoutStatus = timeoutLiveNodes.getNodeStatus(Node("node1.example.com"))!;
             Assert.That(timeoutStatus.State, Is.EqualTo(NodeHealthState.Active));
             Assert.That(timeoutStatus.ConsecutiveServerErrors, Is.EqualTo(0));
         }
