@@ -83,7 +83,7 @@ jobs:
         run: make ccm-install
 
       - name: Cache Scylla relocatable package
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.ccm/scylla-repository
           key: scylla-ccm-relocatable-${{ runner.os }}-${{ runner.arch }}-${{ env.SCYLLA_VERSION }}
