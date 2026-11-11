@@ -122,36 +122,36 @@ namespace ScyllaDB.Alternator
         [Test]
         public void AlternatorDynamoDBClientBuilderRejectsInitialSeedsThatAreNotHostsTest()
         {
-            var uriException = Assert.Throws<ArgumentException>(() =>
+            var uriException = Assert.Throws<ArgumentException>(new Action(() =>
                 AlternatorDynamoDBClient.builder()
-                    .withInitialSeeds("https://dc1-seed.example.com:8043"));
+                    .withInitialSeeds("https://dc1-seed.example.com:8043")));
             Assert.That(uriException!.Message, Does.Contain("DNS name or IP address"));
 
-            var hostPortException = Assert.Throws<ArgumentException>(() =>
+            var hostPortException = Assert.Throws<ArgumentException>(new Action(() =>
                 AlternatorDynamoDBClient.builder()
-                    .WithInitialSeeds("dc1-seed.example.com:8043"));
+                    .WithInitialSeeds("dc1-seed.example.com:8043")));
             Assert.That(hostPortException!.Message, Does.Contain("without scheme or port"));
         }
 
         [Test]
         public void AlternatorDynamoDBClientBuilderRequiresSchemeAndPortForInitialSeedsTest()
         {
-            var schemeException = Assert.Throws<InvalidOperationException>(() =>
+            var schemeException = Assert.Throws<InvalidOperationException>(new Action(() =>
                 AlternatorDynamoDBClient.builder()
                     .withPort(8043)
                     .withInitialSeeds("dc1-seed.example.com")
                     .WithoutValidation()
                     .WithDeferredStart()
-                    .build());
+                    .build()));
             Assert.That(schemeException!.Message, Does.Contain("scheme must be set"));
 
-            var portException = Assert.Throws<InvalidOperationException>(() =>
+            var portException = Assert.Throws<InvalidOperationException>(new Action(() =>
                 AlternatorDynamoDBClient.builder()
                     .withScheme("https")
                     .withInitialSeeds("dc1-seed.example.com")
                     .WithoutValidation()
                     .WithDeferredStart()
-                    .build());
+                    .build()));
             Assert.That(portException!.Message, Does.Contain("port must be set"));
         }
 
@@ -171,18 +171,18 @@ namespace ScyllaDB.Alternator
             Assert.That(wrapper.getAlternatorLiveNodes(), Is.SameAs(wrapper.GetAlternatorLiveNodes()));
             Assert.That(wrapper.getAlternatorLiveNodes().getLiveNodes(), Is.EqualTo(new List<Uri> { new Uri("http://127.0.0.1:8080") }));
             Assert.That(wrapper.getAlternatorLiveNodes().nextAsURI("/localnodes", "rack=r1"), Is.EqualTo(new Uri("http://127.0.0.1:8080/localnodes?rack=r1")));
-            Assert.DoesNotThrow(() => wrapper.Close());
-            Assert.DoesNotThrow(() => wrapper.close());
+            Assert.DoesNotThrow(new Action(() => wrapper.Close()));
+            Assert.DoesNotThrow(new Action(() => wrapper.close()));
         }
 
         [Test]
         public void AlternatorDynamoDBClientBuilderRequiresEndpointOverrideTest()
         {
-            var exception = Assert.Throws<InvalidOperationException>(() =>
+            var exception = Assert.Throws<InvalidOperationException>(new Action(() =>
                 AlternatorDynamoDBClient.builder()
                     .WithoutValidation()
                     .WithDeferredStart()
-                    .build());
+                    .build()));
 
             Assert.That(exception!.Message, Does.Contain("endpointOverride or withInitialSeeds must be set"));
         }
@@ -205,7 +205,7 @@ namespace ScyllaDB.Alternator
             Assert.That(wrapper.getClient(), Is.SameAs(client));
             Assert.That(wrapper.getAlternatorLiveNodes(), Is.SameAs(liveNodes));
             Assert.That(wrapper.getAlternatorConfig(), Is.Null);
-            Assert.Throws<InvalidOperationException>(() => _ = wrapper.Config);
+            Assert.Throws<InvalidOperationException>(new Action(() => _ = wrapper.Config));
 
             var clientWithConfig = new AmazonDynamoDBClient(new AnonymousAWSCredentials(), clientConfig);
             var liveNodesWithConfig = new AlternatorLiveNodes(config);
@@ -289,7 +289,7 @@ namespace ScyllaDB.Alternator
                 .withAlternatorConfig(config)
                 .WithoutValidation()
                 .WithDeferredStart();
-            Assert.Throws<InvalidOperationException>(() => noEndpointBuilder.buildWithAlternatorAPI());
+            Assert.Throws<InvalidOperationException>(new Action(() => noEndpointBuilder.buildWithAlternatorAPI()));
 
             using var wrapper = AlternatorDynamoDBClient.builder()
                 .withAlternatorConfig(config)
@@ -327,7 +327,7 @@ namespace ScyllaDB.Alternator
                 .WithoutValidation()
                 .WithDeferredStart();
 
-            var exception = Assert.Throws<ArgumentException>(() => builder.buildWithAlternatorAPI());
+            var exception = Assert.Throws<ArgumentException>(new Action(() => builder.buildWithAlternatorAPI()));
             Assert.That(exception!.Message, Does.Contain("Content-Encoding"));
         }
 
@@ -415,11 +415,11 @@ namespace ScyllaDB.Alternator
             Assert.That(builder.overrideConfiguration(replacementConfig), Is.SameAs(builder));
             Assert.That(builder.overrideConfiguration(), Is.SameAs(replacementConfig));
             Assert.That(builder.accountIdEndpointMode(AccountIdEndpointMode.DISABLED), Is.SameAs(builder));
-            Assert.Throws<NotSupportedException>(() => builder.endpointProvider(null!));
-            Assert.Throws<NotSupportedException>(() => builder.endpointDiscoveryEnabled(true));
-            Assert.Throws<NotSupportedException>(() => builder.enableEndpointDiscovery());
-            Assert.Throws<NotSupportedException>(() => builder.fipsEnabled(true));
-            Assert.Throws<NotSupportedException>(() => builder.dualstackEnabled(true));
+            Assert.Throws<NotSupportedException>(new Action(() => builder.endpointProvider(null!)));
+            Assert.Throws<NotSupportedException>(new Action(() => builder.endpointDiscoveryEnabled(true)));
+            Assert.Throws<NotSupportedException>(new Action(() => builder.enableEndpointDiscovery()));
+            Assert.Throws<NotSupportedException>(new Action(() => builder.fipsEnabled(true)));
+            Assert.Throws<NotSupportedException>(new Action(() => builder.dualstackEnabled(true)));
         }
 
         [Test]
@@ -456,10 +456,10 @@ namespace ScyllaDB.Alternator
             Assert.That(builder.HttpClientType, Is.EqualTo(HttpClientType.Apache));
             Assert.That(builder.withHttpClientType(HttpClientType.CRT), Is.SameAs(builder));
             Assert.That(builder.HttpClientType, Is.EqualTo(HttpClientType.Crt));
-            Assert.Throws<ArgumentNullException>(() => builder.withHttpClientType(null));
-            Assert.Throws<ArgumentNullException>(() => builder.withHttpClientHandlerCustomizer(null!));
-            Assert.Throws<ArgumentNullException>(() => builder.withApacheHttpClientCustomizer(null!));
-            Assert.Throws<ArgumentNullException>(() => builder.withCrtHttpClientCustomizer(null!));
+            Assert.Throws<ArgumentNullException>(new Action(() => builder.withHttpClientType(null)));
+            Assert.Throws<ArgumentNullException>(new Action(() => builder.withHttpClientHandlerCustomizer(null!)));
+            Assert.Throws<ArgumentNullException>(new Action(() => builder.withApacheHttpClientCustomizer(null!)));
+            Assert.Throws<ArgumentNullException>(new Action(() => builder.withCrtHttpClientCustomizer(null!)));
         }
 
         [Test]
@@ -476,55 +476,55 @@ namespace ScyllaDB.Alternator
 
             using var client = builder.build();
             Assert.That(client, Is.Not.Null);
-            Assert.Throws<ArgumentNullException>(() => AlternatorDynamoDBClient.builder().httpClientFactory(null!));
-            Assert.Throws<InvalidOperationException>(() => AlternatorDynamoDBClient.builder()
+            Assert.Throws<ArgumentNullException>(new Action(() => AlternatorDynamoDBClient.builder().httpClientFactory(null!)));
+            Assert.Throws<InvalidOperationException>(new Action(() => AlternatorDynamoDBClient.builder()
                 .endpointOverride("http://127.0.0.1:8080")
                 .httpClient(factory)
                 .withHttpClientType(HttpClientType.APACHE)
                 .WithoutValidation()
                 .WithDeferredStart()
-                .buildWithAlternatorAPI());
-            Assert.Throws<InvalidOperationException>(() => AlternatorDynamoDBClient.builder()
+                .buildWithAlternatorAPI()));
+            Assert.Throws<InvalidOperationException>(new Action(() => AlternatorDynamoDBClient.builder()
                 .endpointOverride("http://127.0.0.1:8080")
                 .httpClientBuilder(factory)
                 .withSocketsHttpHandlerCustomizer(_ => { })
                 .WithoutValidation()
                 .WithDeferredStart()
-                .buildWithAlternatorAPI());
-            Assert.Throws<NotSupportedException>(() => AlternatorDynamoDBClient.builder()
+                .buildWithAlternatorAPI()));
+            Assert.Throws<NotSupportedException>(new Action(() => AlternatorDynamoDBClient.builder()
                 .endpointOverride("http://127.0.0.1:8080")
                 .withHttpClientType(HttpClientType.NETTY)
                 .WithoutValidation()
                 .WithDeferredStart()
-                .buildWithAlternatorAPI());
+                .buildWithAlternatorAPI()));
         }
 
         [Test]
         public void AlternatorDynamoDBClientBuilderValidatesJavaStyleHttpClientCustomizerConflictsTest()
         {
-            Assert.Throws<InvalidOperationException>(() => AlternatorDynamoDBClient.builder()
+            Assert.Throws<InvalidOperationException>(new Action(() => AlternatorDynamoDBClient.builder()
                 .endpointOverride("http://127.0.0.1:8080")
                 .withApacheHttpClientCustomizer(_ => { })
                 .withCrtHttpClientCustomizer(_ => { })
                 .WithoutValidation()
                 .WithDeferredStart()
-                .buildWithAlternatorAPI());
+                .buildWithAlternatorAPI()));
 
-            Assert.Throws<InvalidOperationException>(() => AlternatorDynamoDBClient.builder()
+            Assert.Throws<InvalidOperationException>(new Action(() => AlternatorDynamoDBClient.builder()
                 .endpointOverride("http://127.0.0.1:8080")
                 .withHttpClientType(HttpClientType.APACHE)
                 .withCrtHttpClientCustomizer(_ => { })
                 .WithoutValidation()
                 .WithDeferredStart()
-                .buildWithAlternatorAPI());
+                .buildWithAlternatorAPI()));
 
-            Assert.Throws<InvalidOperationException>(() => AlternatorDynamoDBClient.builder()
+            Assert.Throws<InvalidOperationException>(new Action(() => AlternatorDynamoDBClient.builder()
                 .endpointOverride("http://127.0.0.1:8080")
                 .withHttpClientType(HttpClientType.CRT)
                 .withApacheHttpClientCustomizer(_ => { })
                 .WithoutValidation()
                 .WithDeferredStart()
-                .buildWithAlternatorAPI());
+                .buildWithAlternatorAPI()));
 
             using var apacheWrapper = AlternatorDynamoDBClient.builder()
                 .endpointOverride("http://127.0.0.1:8080")
@@ -552,7 +552,7 @@ namespace ScyllaDB.Alternator
                 .endpointOverride("https://127.0.0.1:8181");
 
             Assert.That(builder.withSocketsHttpHandlerCustomizer(_ => { }), Is.SameAs(builder));
-            Assert.Throws<ArgumentNullException>(() => builder.withSocketsHttpHandlerCustomizer(null!));
+            Assert.Throws<ArgumentNullException>(new Action(() => builder.withSocketsHttpHandlerCustomizer(null!)));
 
             using var wrapper = builder
                 .withAlternatorConfig(AlternatorConfig.builder()
@@ -707,10 +707,10 @@ namespace ScyllaDB.Alternator
             var builder = AlternatorDynamoDBClient.builder()
                 .endpointOverride("http://127.0.0.1:8080");
 
-            Assert.Throws<ArgumentException>(() => builder.withUserAgent((string)null!));
-            Assert.Throws<ArgumentException>(() => builder.withUserAgent(" "));
-            var nullTransformer = Assert.Throws<ArgumentException>(() =>
-                builder.withUserAgent((Func<string, string?>)null!));
+            Assert.Throws<ArgumentException>(new Action(() => builder.withUserAgent((string)null!)));
+            Assert.Throws<ArgumentException>(new Action(() => builder.withUserAgent(" ")));
+            var nullTransformer = Assert.Throws<ArgumentException>(new Action(() =>
+                builder.withUserAgent((Func<string, string?>)null!)));
             Assert.That(nullTransformer!.Message, Does.Contain("userAgentTransformer cannot be null"));
         }
 
@@ -743,7 +743,7 @@ namespace ScyllaDB.Alternator
                 .WithoutValidation()
                 .WithDeferredStart();
 
-            Assert.Throws<ArgumentException>(() => builder.buildWithAlternatorAPI());
+            Assert.Throws<ArgumentException>(new Action(() => builder.buildWithAlternatorAPI()));
         }
 
         [Test]

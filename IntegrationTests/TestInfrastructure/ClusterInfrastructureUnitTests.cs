@@ -55,7 +55,7 @@ namespace ScyllaDB.Alternator.TestInfrastructure
             var spec = ClusterSpecs.Default.WithYamlOverride("alternator_write_isolation", "always");
 
             Assert.That(
-                spec.Validate,
+                new Action(spec.Validate),
                 Throws.ArgumentException.With.Message.Contains("owned by a typed cluster option"));
         }
 
@@ -66,7 +66,7 @@ namespace ScyllaDB.Alternator.TestInfrastructure
             var spec = ClusterSpecs.Default.WithYamlOverride(key, "true");
 
             Assert.That(
-                spec.Validate,
+                new Action(spec.Validate),
                 Throws.ArgumentException.With.Message.Contains("owned by a typed cluster option"));
         }
 
@@ -90,7 +90,7 @@ namespace ScyllaDB.Alternator.TestInfrastructure
                 AuthorizationMode.AllowAll,
                 true));
 
-            Assert.That(spec.Validate, Throws.ArgumentException.With.Message.Contains("requires authentication"));
+            Assert.That(new Action(spec.Validate), Throws.ArgumentException.With.Message.Contains("requires authentication"));
         }
 
         [Test]
@@ -98,7 +98,7 @@ namespace ScyllaDB.Alternator.TestInfrastructure
         {
             var spec = ClusterSpecs.Default.WithTopology(ClusterTopology.SingleDatacenter(10));
 
-            Assert.That(spec.Validate, Throws.ArgumentException.With.Message.Contains("cannot exceed 9 nodes"));
+            Assert.That(new Action(spec.Validate), Throws.ArgumentException.With.Message.Contains("cannot exceed 9 nodes"));
         }
 
         [Test]
@@ -125,7 +125,7 @@ namespace ScyllaDB.Alternator.TestInfrastructure
 
                 cancellation.Cancel();
                 Assert.That(
-                    async () => await cancelledAcquire,
+                    new Func<Task>(async () => await cancelledAcquire),
                     Throws.InstanceOf<OperationCanceledException>());
                 provisioner.CompleteProvisioning();
 
@@ -264,7 +264,7 @@ namespace ScyllaDB.Alternator.TestInfrastructure
             {
                 var failedLease = await pool.ProvisionPrivateAsync(OneNodeSpec(), CancellationToken.None);
                 Assert.That(
-                    async () => await failedLease.DisposeAsync(),
+                    new Func<Task>(async () => await failedLease.DisposeAsync()),
                     Throws.TypeOf<InvalidOperationException>());
 
                 using var cancellation = new CancellationTokenSource();
@@ -272,7 +272,7 @@ namespace ScyllaDB.Alternator.TestInfrastructure
                 Assert.That(replacement.IsCompleted, Is.False);
                 cancellation.Cancel();
                 Assert.That(
-                    async () => await replacement,
+                    new Func<Task>(async () => await replacement),
                     Throws.InstanceOf<OperationCanceledException>());
 
                 await pool.DisposeAsync();
@@ -298,7 +298,7 @@ namespace ScyllaDB.Alternator.TestInfrastructure
             {
                 var failedLease = await pool.AcquireReusableAsync(OneNodeSpec(), CancellationToken.None);
                 Assert.That(
-                    async () => await failedLease.DisposeAsync(),
+                    new Func<Task>(async () => await failedLease.DisposeAsync()),
                     Throws.TypeOf<InvalidOperationException>());
 
                 using var cancellation = new CancellationTokenSource();
@@ -306,7 +306,7 @@ namespace ScyllaDB.Alternator.TestInfrastructure
                 Assert.That(replacement.IsCompleted, Is.False);
                 cancellation.Cancel();
                 Assert.That(
-                    async () => await replacement,
+                    new Func<Task>(async () => await replacement),
                     Throws.InstanceOf<OperationCanceledException>());
 
                 await pool.DisposeAsync();
@@ -334,7 +334,7 @@ namespace ScyllaDB.Alternator.TestInfrastructure
                 await using var second = await pool.ProvisionPrivateAsync(OneNodeSpec(), CancellationToken.None);
 
                 Assert.That(
-                    async () => await first.Control.AddNodeAsync("dc1", "RAC1"),
+                    new Func<Task>(async () => await first.Control.AddNodeAsync("dc1", "RAC1")),
                     Throws.InvalidOperationException.With.Message.Contains("capacity deadlock"));
             }
             finally
@@ -386,7 +386,7 @@ namespace ScyllaDB.Alternator.TestInfrastructure
             try
             {
                 Assert.That(
-                    async () =>
+                    new Func<Task>(async () =>
                     {
                         if (reusable)
                         {
@@ -396,7 +396,7 @@ namespace ScyllaDB.Alternator.TestInfrastructure
                         {
                             await pool.ProvisionPrivateAsync(OneNodeSpec(), CancellationToken.None);
                         }
-                    },
+                    }),
                     Throws.TypeOf<CcmClusterProvisioningException>());
 
                 using var cancellation = new CancellationTokenSource();
@@ -406,7 +406,7 @@ namespace ScyllaDB.Alternator.TestInfrastructure
                 Assert.That(replacement.IsCompleted, Is.False);
                 cancellation.Cancel();
                 Assert.That(
-                    async () => await replacement,
+                    new Func<Task>(async () => await replacement),
                     Throws.InstanceOf<OperationCanceledException>());
 
                 await pool.DisposeAsync();
@@ -425,11 +425,11 @@ namespace ScyllaDB.Alternator.TestInfrastructure
             var provisioner = new FailingInitialStartProvisioner();
 
             var exception = Assert.ThrowsAsync<CcmClusterProvisioningException>(
-                async () => await provisioner.ProvisionAsync(
+                new Func<Task>(async () => await provisioner.ProvisionAsync(
                     OneNodeSpec(),
                     "failed-cluster",
                     1,
-                    CancellationToken.None));
+                    CancellationToken.None)));
 
             Assert.That(exception!.Cluster.InstanceId, Is.EqualTo("failed-cluster"));
             Assert.That(
@@ -478,7 +478,7 @@ namespace ScyllaDB.Alternator.TestInfrastructure
         public void ExplicitAvailableMemoryRejectsInvalidValues(string configured)
         {
             Assert.That(
-                () => AvailableMemoryDetector.ParseConfiguredMemoryMiB(configured),
+                new Action(() => AvailableMemoryDetector.ParseConfiguredMemoryMiB(configured)),
                 Throws.InvalidOperationException.With.Message.Contains("must be a positive integer"));
         }
 
@@ -489,7 +489,7 @@ namespace ScyllaDB.Alternator.TestInfrastructure
             var cluster = CreatePhysicalCluster(provisioner);
 
             var exception = Assert.ThrowsAsync<CcmNodeProvisioningException>(
-                async () => await provisioner.AddNodeAsync(cluster, "dc1", "RAC1", CancellationToken.None));
+                new Func<Task>(async () => await provisioner.AddNodeAsync(cluster, "dc1", "RAC1", CancellationToken.None)));
 
             Assert.That(exception!.NodeRemainsProvisioned, Is.False);
             Assert.That(provisioner.Commands.Any(IsNodeTwoRemove), Is.True);
@@ -502,7 +502,7 @@ namespace ScyllaDB.Alternator.TestInfrastructure
             var cluster = CreatePhysicalCluster(provisioner);
 
             var exception = Assert.ThrowsAsync<CcmNodeProvisioningException>(
-                async () => await provisioner.AddNodeAsync(cluster, "dc1", "RAC1", CancellationToken.None));
+                new Func<Task>(async () => await provisioner.AddNodeAsync(cluster, "dc1", "RAC1", CancellationToken.None)));
 
             Assert.That(exception!.NodeRemainsProvisioned, Is.False);
             Assert.That(provisioner.Commands.Any(IsNodeTwoRemove), Is.True);
@@ -515,7 +515,7 @@ namespace ScyllaDB.Alternator.TestInfrastructure
             var cluster = CreatePhysicalCluster(provisioner);
 
             var exception = Assert.ThrowsAsync<CcmNodeProvisioningException>(
-                async () => await cluster.AddNodeAsync("dc1", "RAC1", CancellationToken.None));
+                new Func<Task>(async () => await cluster.AddNodeAsync("dc1", "RAC1", CancellationToken.None)));
 
             Assert.That(exception!.NodeRemainsProvisioned, Is.True);
             Assert.That(cluster.Nodes.Select(node => node.Name), Does.Contain("node2"));
