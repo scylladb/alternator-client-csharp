@@ -46,8 +46,8 @@ namespace ScyllaDB.Alternator
                 AttributeValueHasher.hash(new AttributeValue { B = new MemoryStream(new byte[] { 0xff, 0x00, 0x80 }) }),
                 Is.EqualTo(14533934253577680L));
 
-            var unsupported = Assert.Throws<ArgumentException>(() =>
-                AttributeValueHasher.hash(new AttributeValue { BOOL = true }));
+            var unsupported = Assert.Throws<ArgumentException>(new Action(() =>
+                AttributeValueHasher.hash(new AttributeValue { BOOL = true })));
             Assert.That(
                 unsupported!.Message,
                 Does.Contain("Unsupported AttributeValue type. Only S (String), N (Number), and B (Binary) are supported as partition key types in Alternator."));
@@ -126,8 +126,8 @@ namespace ScyllaDB.Alternator
                     && target.Operation == "PutRequest"
                     && target.PartitionKeyValue("pk") == null),
                 Is.True);
-            Assert.Throws<NotSupportedException>(() =>
-                ((IList<KeyAffinityRequestClassifier.BatchWriteRoutingTarget>)targets).Clear());
+            Assert.Throws<NotSupportedException>(new Action(() =>
+                ((IList<KeyAffinityRequestClassifier.BatchWriteRoutingTarget>)targets).Clear()));
         }
 
         [Test]
@@ -318,8 +318,8 @@ namespace ScyllaDB.Alternator
             Assert.That(targets[1].operation(), Is.EqualTo("PutRequest"));
             Assert.That(secondPartitionKey, Is.Not.Null);
             Assert.That(secondPartitionKey!.S, Is.EqualTo("put-key"));
-            Assert.Throws<NotSupportedException>(() =>
-                ((IList<KeyAffinityRequestClassifier.BatchWriteRoutingTarget>)targets).Clear());
+            Assert.Throws<NotSupportedException>(new Action(() =>
+                ((IList<KeyAffinityRequestClassifier.BatchWriteRoutingTarget>)targets).Clear()));
         }
 
         [Test]
@@ -331,8 +331,8 @@ namespace ScyllaDB.Alternator
             });
 
             Assert.That(resolver.getPartitionKeyName("users"), Is.EqualTo("user_id"));
-            Assert.DoesNotThrow(() => resolver.close());
-            Assert.DoesNotThrow(() => resolver.close());
+            Assert.DoesNotThrow(new Action(() => resolver.close()));
+            Assert.DoesNotThrow(new Action(() => resolver.close()));
         }
 
         [Test]
