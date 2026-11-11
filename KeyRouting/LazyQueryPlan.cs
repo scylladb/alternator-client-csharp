@@ -19,6 +19,7 @@ namespace ScyllaDB.Alternator.KeyRouting
         private readonly AlternatorLiveNodes? liveNodes;
         private readonly GoRand? random;
         private readonly List<Uri>? fixedNodes;
+        private readonly List<Uri>? fixedFallbackNodes;
         private readonly List<Uri>? preferredNodes;
         private readonly HashSet<Uri> usedNodes = new HashSet<Uri>();
         private List<Uri>? remaining;
@@ -32,14 +33,11 @@ namespace ScyllaDB.Alternator.KeyRouting
         }
 
         public LazyQueryPlan(IEnumerable<Uri> nodes, long seed)
+            : this(
+                nodes ?? throw new ArgumentException("nodes cannot be null", nameof(nodes)),
+                Array.Empty<Uri>(),
+                seed)
         {
-            if (nodes == null)
-            {
-                throw new ArgumentException("nodes cannot be null", nameof(nodes));
-            }
-
-            this.random = new GoRand(seed);
-            this.fixedNodes = new List<Uri>(nodes);
         }
 
         public LazyQueryPlan(AlternatorLiveNodes liveNodes)
@@ -69,6 +67,51 @@ namespace ScyllaDB.Alternator.KeyRouting
             this.preferredNodes = new List<Uri>(preferredNodes);
         }
 
+        internal LazyQueryPlan(
+            IEnumerable<Uri> primaryNodes,
+            IEnumerable<Uri> fallbackNodes,
+            long seed)
+        {
+            if (primaryNodes == null)
+            {
+                throw new ArgumentException("primaryNodes cannot be null", nameof(primaryNodes));
+            }
+
+            if (fallbackNodes == null)
+            {
+                throw new ArgumentException("fallbackNodes cannot be null", nameof(fallbackNodes));
+            }
+
+            this.random = new GoRand(seed);
+            this.fixedNodes = new List<Uri>(primaryNodes);
+            this.fixedFallbackNodes = new List<Uri>(fallbackNodes);
+        }
+
+        internal LazyQueryPlan(
+            IEnumerable<Uri> primaryNodes,
+            IEnumerable<Uri> fallbackNodes,
+            IEnumerable<Uri> preferredNodes)
+        {
+            if (primaryNodes == null)
+            {
+                throw new ArgumentException("primaryNodes cannot be null", nameof(primaryNodes));
+            }
+
+            if (fallbackNodes == null)
+            {
+                throw new ArgumentException("fallbackNodes cannot be null", nameof(fallbackNodes));
+            }
+
+            if (preferredNodes == null)
+            {
+                throw new ArgumentException("preferredNodes cannot be null", nameof(preferredNodes));
+            }
+
+            this.fixedNodes = new List<Uri>(primaryNodes);
+            this.fixedFallbackNodes = new List<Uri>(fallbackNodes);
+            this.preferredNodes = new List<Uri>(preferredNodes);
+        }
+
         public bool HasNext
         {
             get
@@ -85,7 +128,13 @@ namespace ScyllaDB.Alternator.KeyRouting
 
         public static List<Uri> SortedAffinityNodes(AlternatorLiveNodes liveNodes)
         {
-            var nodes = GetPrimaryNodes(liveNodes);
+            if (liveNodes == null)
+            {
+                throw new ArgumentException("liveNodes cannot be null", nameof(liveNodes));
+            }
+
+            var snapshot = liveNodes.CaptureQueryPlanNodes();
+            var nodes = (snapshot.PrimaryNodes.Count != 0 ? snapshot.PrimaryNodes : snapshot.FallbackNodes).ToList();
             SortAffinityNodes(nodes);
             return nodes;
         }
@@ -213,31 +262,6 @@ namespace ScyllaDB.Alternator.KeyRouting
             return sortedNodes[new GoRand(seed).Intn(sortedNodes.Count)];
         }
 
-        private static List<Uri> GetPrimaryNodes(AlternatorLiveNodes liveNodes)
-        {
-            if (liveNodes == null)
-            {
-                throw new ArgumentException("liveNodes cannot be null", nameof(liveNodes));
-            }
-
-            var activeNodes = liveNodes.GetActiveNodesInternal().ToList();
-            return activeNodes.Count != 0
-                ? activeNodes
-                : liveNodes.GetQuarantinedNodesInternal().ToList();
-        }
-
-        private static List<Uri> GetFallbackNodes(AlternatorLiveNodes liveNodes)
-        {
-            if (liveNodes == null)
-            {
-                throw new ArgumentException("liveNodes cannot be null", nameof(liveNodes));
-            }
-
-            return liveNodes.GetActiveNodesInternal().Count != 0
-                ? liveNodes.GetQuarantinedNodesInternal().ToList()
-                : new List<Uri>();
-        }
-
         private static void SortAffinityNodes(List<Uri> nodes)
         {
             nodes.Sort((left, right) => string.Compare(left.ToString(), right.ToString(), StringComparison.Ordinal));
@@ -276,27 +300,23 @@ namespace ScyllaDB.Alternator.KeyRouting
             if (this.fixedNodes != null)
             {
                 this.remaining = new List<Uri>(this.fixedNodes);
-                SortAffinityNodes(this.remaining);
+                this.fallbackRemaining = new List<Uri>(this.fixedFallbackNodes!);
             }
             else
             {
-                if (this.preferredNodes != null)
-                {
-                    this.remaining = this.liveNodes!.GetActiveNodesInternal().ToList();
-                    this.fallbackRemaining = this.liveNodes.GetQuarantinedNodesInternal().ToList();
-                }
-                else
-                {
-                    this.remaining = GetPrimaryNodes(this.liveNodes!);
-                    this.fallbackRemaining = GetFallbackNodes(this.liveNodes!);
-                }
+                var nodes = this.liveNodes!.CaptureQueryPlanNodes(
+                    this.preferredNodes == null
+                        ? AlternatorLiveNodes.QueryPlanCaptureMode.Seeded
+                        : AlternatorLiveNodes.QueryPlanCaptureMode.Preferred);
+                this.remaining = new List<Uri>(nodes.PrimaryNodes);
+                this.fallbackRemaining = new List<Uri>(nodes.FallbackNodes);
+            }
 
-                SortAffinityNodes(this.remaining);
-                SortAffinityNodes(this.fallbackRemaining);
-                if (this.preferredNodes != null)
-                {
-                    this.remaining = OrderPreferredNodesFirst(this.remaining, this.preferredNodes);
-                }
+            SortAffinityNodes(this.remaining);
+            SortAffinityNodes(this.fallbackRemaining);
+            if (this.preferredNodes != null)
+            {
+                this.remaining = OrderPreferredNodesFirst(this.remaining, this.preferredNodes);
             }
 
             this.initialized = true;
@@ -326,12 +346,12 @@ namespace ScyllaDB.Alternator.KeyRouting
                 return this.nextNode;
             }
 
-            var availableNodes = this.liveNodes.GetActiveNodesInternal()
+            var availableNodes = this.liveNodes.GetOrdinaryActiveNodes()
                 .Where(node => !this.usedNodes.Contains(node))
                 .ToList();
             if (availableNodes.Count == 0)
             {
-                availableNodes = this.liveNodes.GetQuarantinedNodesInternal()
+                availableNodes = this.liveNodes.GetOrdinaryQuarantinedNodes()
                     .Where(node => !this.usedNodes.Contains(node))
                     .ToList();
             }
