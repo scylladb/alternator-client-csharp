@@ -138,14 +138,14 @@ jobs:
 
       - name: Upload validated packages
         id: packages
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: validated-packages-${{ github.run_attempt }}
           path: nupkgs/*.nupkg
           if-no-files-found: error
 
       - name: Upload sanitized validation logs
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
           name: validation-logs-${{ github.run_attempt }}
@@ -204,7 +204,7 @@ jobs:
         run: python3 "$RUNNER_TEMP/release-policy/scripts/release/history.py" plan
 
       - name: Download validated packages as data
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           artifact-ids: ${{ needs.validate.outputs.package-artifact-id }}
           path: nupkgs
@@ -285,7 +285,7 @@ jobs:
         run: make -f "$RUNNER_TEMP/release-policy/Makefile" release-dry-run-summary
 
       - name: Upload NuGet package
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
           name: nuget-package-${{ github.run_attempt }}
@@ -299,7 +299,7 @@ jobs:
             nupkgs/release-history.bundle
 
       - name: Upload sanitized release logs
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
           name: release-logs-${{ github.run_attempt }}

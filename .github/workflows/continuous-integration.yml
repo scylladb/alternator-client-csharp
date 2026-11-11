@@ -61,7 +61,7 @@ jobs:
         run: make try-get
 
       - name: Upload NuGet package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: nuget-package-dotnet-${{ matrix.dotnet-version }}
           path: nupkgs/*.nupkg
@@ -70,7 +70,7 @@ jobs:
         run: make test-unit
 
       - name: Upload unit test results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: unit-test-results-dotnet-${{ matrix.dotnet-version }}
@@ -93,14 +93,14 @@ jobs:
         run: make test-integration
 
       - name: Upload integration test results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: integration-test-results-dotnet-${{ matrix.dotnet-version }}
           path: IntegrationTests/TestResults/**/*.trx
 
       - name: Upload CCM diagnostics
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: ccm-diagnostics-dotnet-${{ matrix.dotnet-version }}
