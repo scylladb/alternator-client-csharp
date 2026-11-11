@@ -66,3 +66,6 @@ IntegrationTests/scylla/*.key
 # Release signing source is not a Visual Studio build output.
 !/scripts/release/
 scripts/release/__pycache__/
+
+# Trusted release-note tooling dependencies
+.github/node_modules/

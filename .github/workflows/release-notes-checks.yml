@@ -1,0 +1,20 @@
+name: Release notes checks
+on:
+  pull_request:
+    paths: ['.github/**', 'scripts/release/**']
+  push:
+    branches: [main]
+    paths: ['.github/**', 'scripts/release/**']
+permissions:
+  contents: read
+jobs:
+  release-notes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - run: npm ci --ignore-scripts --prefix .github
+      - run: node --test .github/tests/release-notes-guard.test.cjs
+      - run: python3 -m unittest discover -s scripts/release -p test_github_release.py -v

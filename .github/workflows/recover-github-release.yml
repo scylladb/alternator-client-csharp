@@ -1,0 +1,46 @@
+name: Recover GitHub release notes
+on:
+  workflow_dispatch:
+    inputs:
+      release-run:
+        description: Original release run ID containing the signed history artifact
+        required: true
+        type: string
+      release-attempt:
+        description: Original release run attempt containing that artifact
+        required: true
+        type: string
+permissions:
+  actions: read
+  contents: write
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    environment: release
+    timeout-minutes: 10
+    steps:
+      - name: Checkout trusted recovery tools
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Validate release environment protection
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/release/guard.py check-environment
+      - name: Download retained signed release history as data
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN: ${{ inputs.release-run }}
+          SOURCE_ATTEMPT: ${{ inputs.release-attempt }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_RUN" =~ ^[1-9][0-9]*$ ]]
+          [[ "$SOURCE_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
+          gh run download "$SOURCE_RUN" --repo "$GITHUB_REPOSITORY" \
+            --name "nuget-package-$SOURCE_ATTEMPT" --dir "$RUNNER_TEMP/recovery-artifacts"
+      - name: Recover only the missing GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PACKAGE_OUTPUT_DIR: ${{ runner.temp }}/recovery-artifacts
+        run: python3 scripts/release/github_release.py recover

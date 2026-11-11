@@ -367,6 +367,105 @@ class SigningTests(unittest.TestCase):
                 commands = Path(os.environ["BUILD_OBSERVATIONS"]).read_text()
                 self.assertNotIn('"push"', commands)
 
+    def test_notes_recovery_verifies_published_history_without_republication(self):
+        with self.make_repository() as directory:
+            signing.run(["make", "release-prepare"])
+            output = Path("nupkgs").resolve()
+            manifest = output / "release-history.json"
+            values = json.loads(manifest.read_text())
+            remote = directory / "remote.git"
+            signing.run(["git", "init", "--bare", "--quiet", str(remote)])
+            signing.run(["git", "remote", "add", "origin", str(remote)])
+            signing.run(["git", "push", "--quiet", "origin", values["baseline"] + ":refs/heads/main"])
+            history.push()
+            refs = signing.run(["git", "--git-dir", str(remote), "show-ref"])
+            head = signing.run(["git", "rev-parse", "HEAD"])
+            build_commands = Path(os.environ["BUILD_OBSERVATIONS"]).read_bytes()
+            retained = {path: path.read_bytes() for path in (
+                manifest, output / "release-history.json.asc", output / "release-history.bundle")}
+            tools = directory / "bin"
+            real_git = shutil.which("git")
+            git_log = directory / "recovery-git.jsonl"
+            (tools / "git").write_text("#!/usr/bin/env python3\n" +
+                "import json, os, sys\n" +
+                "with open(os.environ['RECOVERY_GIT_LOG'], 'a') as log: log.write(json.dumps(sys.argv[1:]) + '\\n')\n" +
+                "os.execv(" + repr(real_git) + ", [" + repr(real_git) + ", *sys.argv[1:]])\n")
+            (tools / "git").chmod(0o700)
+            api_log = directory / "recovery-api.jsonl"
+            published = directory / "published"
+            (tools / "gh").write_text("#!/usr/bin/env python3\n" + "\n".join([
+                "import json, os, pathlib, subprocess, sys",
+                "args = sys.argv[1:]",
+                "assert args[0] == 'api', args",
+                "with open(os.environ['RECOVERY_API_LOG'], 'a') as log: log.write(json.dumps(args) + '\\n')",
+                "endpoint = args[2] if args[1] == '--include' else args[1]",
+                "published = pathlib.Path(os.environ['RECOVERY_PUBLISHED'])",
+                "if '/git/ref/tags/' in endpoint:",
+                "    tag = endpoint.rsplit('/', 1)[1]",
+                "    sha = subprocess.check_output(['git', '--git-dir', os.environ['RECOVERY_REMOTE'], 'rev-parse', 'refs/tags/' + tag], text=True).strip()",
+                "    print(json.dumps({'ref': 'refs/tags/' + tag, 'object': {'sha': sha}}))",
+                "elif args[1] == '--include':",
+                "    if not published.exists(): print('HTTP/2 404 Not Found\\n'); sys.exit(1)",
+                "    print('HTTP/2 200 OK\\n\\n' + json.dumps({'tag_name': '2.0.5', 'draft': False, 'published_at': '2026-10-25T00:00:00Z'}))",
+                "elif endpoint.endswith('/releases?per_page=100'):",
+                "    assert args[-2:] == ['--paginate', '--slurp']",
+                "    draft = {'tag_name': '2.0.5', 'draft': True, 'published_at': None}",
+                "    print(json.dumps([[], [draft]] if os.environ.get('RECOVERY_DRAFT') == 'true' else [[]]))",
+                "elif endpoint.endswith('/generate-notes'):",
+                "    if os.environ.get('RECOVERY_FAIL_NOTES') == 'true': sys.exit(23)",
+                "    print(json.dumps({'body': 'Filtered recovered notes'}))",
+                "elif endpoint.endswith('/releases'):",
+                "    assert 'body=Filtered recovered notes' in args",
+                "    published.write_text('created'); print('{}')",
+                "else: raise AssertionError(args)",
+            ]) + "\n")
+            (tools / "gh").chmod(0o700)
+            env = {**os.environ, "PACKAGE_OUTPUT_DIR": str(output),
+                   "GITHUB_REPOSITORY": "owner/repo", "RECOVERY_REMOTE": str(remote),
+                   "RECOVERY_API_LOG": str(api_log), "RECOVERY_GIT_LOG": str(git_log),
+                   "RECOVERY_PUBLISHED": str(published),
+                   # Recovery must succeed without usable private signing credentials.
+                   "RELEASE_GPG_PRIVATE_KEY": "invalid-private-key", "RELEASE_GPG_PASSPHRASE": "invalid",
+                   "RELEASE_GPG_PRIVATE_KEY_FILE": str(directory / "absent-private-key")}
+            command = [sys.executable, str(Path("scripts/release/github_release.py").resolve()), "recover"]
+            draft = subprocess.run(command, env={**env, "RECOVERY_DRAFT": "true"},
+                                   capture_output=True, text=True, timeout=60)
+            self.assertNotEqual(draft.returncode, 0)
+            self.assertIn("Existing GitHub release is unpublished", draft.stderr)
+            self.assertFalse(published.exists())
+            failed = subprocess.run(command, env={**env, "RECOVERY_FAIL_NOTES": "true"},
+                                    capture_output=True, text=True, timeout=60)
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertFalse(published.exists())
+            for _ in range(2):
+                result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=60)
+                self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(published.exists())
+            calls = [json.loads(line) for line in api_log.read_text().splitlines()]
+            self.assertEqual(sum(args[1] == "repos/owner/repo/releases" for args in calls), 1)
+            git_calls = [json.loads(line) for line in git_log.read_text().splitlines()]
+            self.assertFalse(any(part in {"push", "commit", "commit-tree", "mktag", "tag"}
+                                 for args in git_calls for part in args))
+            self.assertEqual(Path(os.environ["BUILD_OBSERVATIONS"]).read_bytes(), build_commands)
+            self.assertEqual({path: path.read_bytes() for path in retained}, retained)
+            with patch.dict(os.environ, {"RECOVERY_GIT_LOG": str(git_log)}):
+                self.assertEqual(signing.run(["git", "--git-dir", str(remote), "show-ref"]), refs)
+                self.assertEqual(signing.run(["git", "rev-parse", "HEAD"]), head)
+            # Invalid retained authority must fail before any GitHub operation.
+            calls_before = api_log.read_bytes()
+            manifest.write_bytes(retained[manifest] + b" ")
+            result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=60)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(api_log.read_bytes(), calls_before)
+            manifest.write_bytes(retained[manifest])
+            # Even valid signed retained history cannot authorize a moved remote tag.
+            with patch.dict(os.environ, {"RECOVERY_GIT_LOG": str(git_log)}):
+                signing.run(["git", "--git-dir", str(remote), "update-ref", "refs/tags/2.0.5", values["baseline"]])
+            result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=60)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Authoritative release tag is missing or changed", result.stderr)
+            self.assertEqual(len(api_log.read_text().splitlines()), len(calls) + 1)
+
     @contextmanager
     def make_repository(self, preserved=False):
         with self.repository() as directory:
@@ -381,6 +480,7 @@ class SigningTests(unittest.TestCase):
             shutil.copyfile(self.public, helper.with_name("publisher.asc"))
             shutil.copyfile(ROOT / "scripts/release/guard.py", helper.with_name("guard.py"))
             shutil.copyfile(ROOT / "scripts/release/history.py", helper.with_name("history.py"))
+            shutil.copyfile(ROOT / "scripts/release/github_release.py", helper.with_name("github_release.py"))
             Path("ScyllaDB.Alternator.csproj").write_text(
                 '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup>'
                 '<TargetFramework>net8.0</TargetFramework><PackageId>ScyllaDB.Alternator</PackageId>'
@@ -416,6 +516,7 @@ class SigningTests(unittest.TestCase):
             ]) + "\n")
             dotnet.chmod(0o700)
             os.environ.update(PATH=str(tools) + os.pathsep + os.environ["PATH"],
+                              RELEASE_SOURCE_REF="heads/main",
                               GITHUB_ACTIONS="true", GITHUB_ACTOR="scylladb-publisher", GITHUB_TRIGGERING_ACTOR="scylladb-publisher",
                               BUILD_OBSERVATIONS=str(directory / "build-observations"),
                               MAKEFILE_PATH=str(Path.cwd()))

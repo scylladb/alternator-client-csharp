@@ -167,6 +167,7 @@ class CaptureTests(unittest.TestCase):
 class PolicyTests(unittest.TestCase):
     def test_direct_guard_enforces_local_operator_policy_before_any_work(self):
         for command in (["check-user"], ["check-environment"], ["checkout-target"],
+                        ["check-publication-target"],
                         ["check-target"], ["record-source"], ["check-source"],
                         ["run", "unused"], ["publish"]):
             for actor, triggering in (("other", ""), ("scylladb-publisher", "other"), ("", "")):
@@ -186,13 +187,39 @@ class PolicyTests(unittest.TestCase):
                     {"GITHUB_ACTIONS": "false", "NUGET_PUBLISH_TOKEN": "temporary-token"},
                     {"GITHUB_ACTIONS": "true", "NUGET_PUBLISH_TOKEN": "temporary-token",
                      "NUGET_SOURCE": "https://other.example/index.json"}):
-            with self.subTest(env=env), patch.dict(os.environ, env, clear=True), \
+            with self.subTest(env=env), patch.dict(os.environ, {**env, "RELEASE_SOURCE_REF": "heads/main"}, clear=True), \
                     patch.object(sys, "argv", ["guard.py", "publish"]), \
                     patch.object(guard, "authorize_operator"), \
                     patch.object(guard, "verify_outputs", return_value=[Path("test.nupkg")]), \
                     patch.object(guard, "capture") as capture, redirect_stderr(StringIO()):
                 self.assertEqual(guard.main(), 2)
                 capture.assert_not_called()
+
+    def test_non_main_publication_is_rejected_before_verification_or_credentials(self):
+        for source in ("tags/2.0.5", "heads/release/2.0", ""):
+            with self.subTest(source=source), \
+                    patch.dict(os.environ, {"GITHUB_ACTIONS": "true", "RELEASE_SOURCE_REF": source}, clear=True), \
+                    patch.object(sys, "argv", ["guard.py", "publish"]), \
+                    patch.object(guard, "verify_outputs") as verify, \
+                    patch.object(guard, "capture") as publish, redirect_stderr(StringIO()):
+                self.assertEqual(guard.main(), 2)
+                verify.assert_not_called()
+                publish.assert_not_called()
+
+    def test_early_publication_target_command_rejects_historical_sources(self):
+        helper = Path(__file__).with_name("guard.py")
+        for target, code in (("main", 0), ("2.0.5", 2), ("release/2.0", 2)):
+            with self.subTest(target=target):
+                env = {**os.environ, "GITHUB_ACTIONS": "true", "RELEASE_TARGET_TAG": target}
+                result = subprocess.run([sys.executable, str(helper), "check-publication-target"],
+                                        env=env, capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, code)
+        workflow = (Path(__file__).resolve().parents[2] / ".github/workflows/release.yml").read_text()
+        early = workflow.index("Reject non-main package publication before preparation")
+        self.assertIn("if: inputs.dry-run == false", workflow[early:early + 240])
+        self.assertLess(early, workflow.index("Checkout selected release target"))
+        self.assertLess(early, workflow.index("Plan release versions and source tree"))
+        self.assertLess(early, workflow.index("Authenticate NuGet trusted publisher"))
 
     def test_workflow_uses_oidc_only_for_publication(self):
         workflow = (Path(__file__).resolve().parents[2] / ".github/workflows/release.yml").read_text()
