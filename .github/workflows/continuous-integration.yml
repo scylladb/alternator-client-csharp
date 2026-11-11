@@ -49,7 +49,7 @@ jobs:
         with:
           dotnet-version: ${{ matrix.dotnet-version }}
 
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v10.3.3
 
       - name: Restore
         run: dotnet restore ScyllaDB.Alternator.sln --verbosity minimal
