@@ -22,8 +22,8 @@
     </PropertyGroup>
 
     <ItemGroup>
-      <PackageReference Include="AWSSDK.DynamoDBv2" Version="4.0.110.2" />
-      <PackageReference Include="NLog.Extensions.Logging" Version="5.5.0" />
+      <PackageReference Include="AWSSDK.DynamoDBv2" Version="4.0.110.3" />
+      <PackageReference Include="NLog.Extensions.Logging" Version="6.3.0" />
       <PackageReference Include="StyleCop.Analyzers" Version="1.1.118">
         <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
         <PrivateAssets>all</PrivateAssets>
