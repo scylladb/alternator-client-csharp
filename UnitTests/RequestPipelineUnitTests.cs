@@ -218,8 +218,8 @@ namespace ScyllaDB.Alternator
                 .WithDeferredStart()
                 .build();
 
-            Assert.ThrowsAsync<AmazonDynamoDBException>(new Func<Task>(() => client.ListTablesAsync()));
-            Assert.ThrowsAsync<AmazonDynamoDBException>(new Func<Task>(() => client.ListTablesAsync()));
+            await Assert.ThrowsAsync<AmazonDynamoDBException>(new Func<Task>(() => client.ListTablesAsync()));
+            await Assert.ThrowsAsync<AmazonDynamoDBException>(new Func<Task>(() => client.ListTablesAsync()));
             var result = await client.ListTablesAsync().ConfigureAwait(false);
 
             await server.WaitAsync().ConfigureAwait(false);

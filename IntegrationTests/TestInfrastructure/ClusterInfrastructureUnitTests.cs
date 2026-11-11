@@ -420,11 +420,11 @@ namespace ScyllaDB.Alternator.TestInfrastructure
         }
 
         [Test]
-        public void FailedInitialClusterRollbackExposesClusterForRetry()
+        public async Task FailedInitialClusterRollbackExposesClusterForRetry()
         {
             var provisioner = new FailingInitialStartProvisioner();
 
-            var exception = Assert.ThrowsAsync<CcmClusterProvisioningException>(
+            var exception = await Assert.ThrowsAsync<CcmClusterProvisioningException>(
                 new Func<Task>(async () => await provisioner.ProvisionAsync(
                     OneNodeSpec(),
                     "failed-cluster",
@@ -434,7 +434,7 @@ namespace ScyllaDB.Alternator.TestInfrastructure
             Assert.That(exception!.Cluster.InstanceId, Is.EqualTo("failed-cluster"));
             Assert.That(
                 provisioner.Commands,
-                Has.Exactly(1).Matches<string[]>(command => command[0] == "remove"));
+                Has.Exactly(1).Matches<string[]>(command => command != null && command[0] == "remove"));
         }
 
         [Test]
@@ -483,12 +483,12 @@ namespace ScyllaDB.Alternator.TestInfrastructure
         }
 
         [Test]
-        public void FailedAddedNodeStartIsRolledBack()
+        public async Task FailedAddedNodeStartIsRolledBack()
         {
             var provisioner = new FailingNodeStartProvisioner(rollbackFails: false);
             var cluster = CreatePhysicalCluster(provisioner);
 
-            var exception = Assert.ThrowsAsync<CcmNodeProvisioningException>(
+            var exception = await Assert.ThrowsAsync<CcmNodeProvisioningException>(
                 new Func<Task>(async () => await provisioner.AddNodeAsync(cluster, "dc1", "RAC1", CancellationToken.None)));
 
             Assert.That(exception!.NodeRemainsProvisioned, Is.False);
@@ -496,12 +496,12 @@ namespace ScyllaDB.Alternator.TestInfrastructure
         }
 
         [Test]
-        public void FailedCcmAddCommandIsRolledBack()
+        public async Task FailedCcmAddCommandIsRolledBack()
         {
             var provisioner = new FailingNodeStartProvisioner(rollbackFails: false, addFails: true);
             var cluster = CreatePhysicalCluster(provisioner);
 
-            var exception = Assert.ThrowsAsync<CcmNodeProvisioningException>(
+            var exception = await Assert.ThrowsAsync<CcmNodeProvisioningException>(
                 new Func<Task>(async () => await provisioner.AddNodeAsync(cluster, "dc1", "RAC1", CancellationToken.None)));
 
             Assert.That(exception!.NodeRemainsProvisioned, Is.False);
@@ -509,12 +509,12 @@ namespace ScyllaDB.Alternator.TestInfrastructure
         }
 
         [Test]
-        public void FailedAddedNodeRollbackRemainsTracked()
+        public async Task FailedAddedNodeRollbackRemainsTracked()
         {
             var provisioner = new FailingNodeStartProvisioner(rollbackFails: true);
             var cluster = CreatePhysicalCluster(provisioner);
 
-            var exception = Assert.ThrowsAsync<CcmNodeProvisioningException>(
+            var exception = await Assert.ThrowsAsync<CcmNodeProvisioningException>(
                 new Func<Task>(async () => await cluster.AddNodeAsync("dc1", "RAC1", CancellationToken.None)));
 
             Assert.That(exception!.NodeRemainsProvisioned, Is.True);
@@ -643,7 +643,7 @@ namespace ScyllaDB.Alternator.TestInfrastructure
             Assert.That(provisioner.DiagnosticsAttempts, Is.EqualTo(2));
             Assert.That(
                 provisioner.Commands,
-                Has.Exactly(1).Matches<string[]>(command => command[0] == "remove"));
+                Has.Exactly(1).Matches<string[]>(command => command != null && command[0] == "remove"));
         }
 
         [TestCase("1073741824", "536870912", 512)]
