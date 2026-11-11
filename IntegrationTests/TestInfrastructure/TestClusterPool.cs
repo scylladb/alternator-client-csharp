@@ -928,10 +928,7 @@ namespace ScyllaDB.Alternator.TestInfrastructure
             }
 
             var parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-            return parts.Length >= 2
-                && long.TryParse(parts[1], NumberStyles.None, CultureInfo.InvariantCulture, out var kibibytes)
-                ? kibibytes / 1024
-                : 0;
+            return parts.Length >= 2 && long.TryParse(parts[1], NumberStyles.None, CultureInfo.InvariantCulture, out var kibibytes) ? kibibytes / 1024 : 0;
         }
 
         private static long? ReadCgroupAvailableMemoryMiB()
@@ -1077,13 +1074,7 @@ namespace ScyllaDB.Alternator.TestInfrastructure
                 return null;
             }
 
-            return long.TryParse(
-                currentText,
-                NumberStyles.None,
-                CultureInfo.InvariantCulture,
-                out var current)
-                ? Math.Max(0, maximum - current) / (1024 * 1024)
-                : null;
+            return long.TryParse(currentText, NumberStyles.None, CultureInfo.InvariantCulture, out var current) ? Math.Max(0, maximum - current) / (1024 * 1024) : null;
         }
     }
 }

@@ -161,7 +161,8 @@ namespace ScyllaDB.Alternator
                 () =>
             {
                 this.UpdateCycle(this.refreshCancellation.Token);
-            }, CancellationToken.None);
+            },
+                CancellationToken.None);
             return Task.CompletedTask;
         }
 

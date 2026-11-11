@@ -475,7 +475,7 @@ namespace ScyllaDB.Alternator
             Assert.That(interceptor.getLiveNodes(), Is.SameAs(liveNodes));
             Assert.That(interceptor.getConfig(), Is.SameAs(affinity));
             Assert.That(interceptor.getPartitionKeyResolver(), Is.Not.Null);
-            Assert.That(interceptor.getPartitionKeyResolver() !.getPartitionKeyName("users"), Is.EqualTo("user_id"));
+            Assert.That(interceptor.getPartitionKeyResolver()!.getPartitionKeyName("users"), Is.EqualTo("user_id"));
             Assert.That(DrainQueryPlanUris(actualPlan, 5), Is.EqualTo(DrainQueryPlanUris(expectedPlan, 5)));
         }
 

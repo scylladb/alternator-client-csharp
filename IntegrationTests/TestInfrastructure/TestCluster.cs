@@ -130,10 +130,12 @@ namespace ScyllaDB.Alternator.TestInfrastructure
             string? startName = null;
             do
             {
-                var response = await client.ListTablesAsync(new ListTablesRequest
-                {
-                    ExclusiveStartTableName = startName,
-                }, cancellationToken);
+                var response = await client.ListTablesAsync(
+                    new ListTablesRequest
+                    {
+                        ExclusiveStartTableName = startName,
+                    },
+                    cancellationToken);
                 foreach (var tableName in response.TableNames.Where(name => name.StartsWith(this.prefix, StringComparison.Ordinal)))
                 {
                     try
